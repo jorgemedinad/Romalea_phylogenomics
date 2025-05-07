@@ -1,0 +1,11 @@
+# BLASTP 2.7.1+
+# Query: 24f9d462521d9bb0c0cf3dd2b598adf5f9b057545966e845bdb19bbadfa0cd07
+# Database: sets/test_set/blast/test_set
+# Fields: query id, subject id, evalue, bit score, q. start, q. end
+# 5 hits found
+24f9d462521d9bb0c0cf3dd2b598adf5f9b057545966e845bdb19bbadfa0cd07	1950	0.0	830	1	410
+24f9d462521d9bb0c0cf3dd2b598adf5f9b057545966e845bdb19bbadfa0cd07	1096	3.74e-115	358	179	415
+24f9d462521d9bb0c0cf3dd2b598adf5f9b057545966e845bdb19bbadfa0cd07	1096	5.74e-16	79.7	43	108
+24f9d462521d9bb0c0cf3dd2b598adf5f9b057545966e845bdb19bbadfa0cd07	18574	3.21e-43	158	303	410
+24f9d462521d9bb0c0cf3dd2b598adf5f9b057545966e845bdb19bbadfa0cd07	9209	2.30e-06	48.5	46	91
+# BLAST processed 1 queries

@@ -1,0 +1,265 @@
+# Change Log
+
+Notable changes to the Orthograph project will be documented in this file.
+This project adheres to [Semantic Versioning](http://semver.org/).
+This file tries to adhere to [Good Changelog Principles](https://github.com/olivierlacan/keep-a-changelog).
+
+## 0.7.0
+
+### Fixed
+
+* Did not allow changing `sqlite-program` on the command line
+
+### Added
+
+* Option `input-is-amino-acid` to allow analysis of protein data directly
+
+## 0.6.3
+
+### Fixed
+
+* Consider all reverse search results with the same bit score equally, not in
+arbitrary order
+
+### Changed
+
+* Reverse search output directory renamed to 'blast' or 'swipe' depending on
+what the reverse search algorithm is
+
+## [0.6.2]
+
+### Added
+
+* `--version` option to display version
+
+### Changed
+
+* "Parsing config file ..." message now omitted when not verbose or debug
+* "Using SQLite database file ..." message now omitted when not verbose or
+debug
+* Default for `alignment-program` is now `mafft-linsi`
+* Updated `calculate_statistics_orthograph_results.pl`:
+  1. It now checks whether there are hits for each species of the analysis
+  2. If not the values 0 are printed as output for all the statistics
+  3. It also checks whether the aa output directory for each species exists
+
+### Fixed
+
+* Fixed version mismatch in testing dependencies
+
+## [0.6.1]
+
+### Fixed
+
+* SWIPE executable is only tested if `reverse-search-algorithm` is set to
+`swipe` and `swipe-program` is set
+
+### Changed
+
+* `fill-with-x` is now disabled by default and must be turned on if desired
+* removed `no-fill-with-x` option.
+
+## [0.6.0]
+
+### Added
+
+* SWIPE algorithm now supported. Additional options:
+`reverse-search-algorithm` (values: 'blast' or 'swipe'; default: 'blast') and
+`swipe-program` (default value: 'swipe')
+
+### Changed
+
+* Output directory for BLAST/SWIPE search results is now named 'reverse' by default
+* Changed option name 'blastp-output-dir' to 'reverse-search-output-dir'
+
+### Fixed
+
+* `fill-with-x` is now negatable by using `no-fill-with-x`
+* Statistics script now calculates correct N50
+* Fix off-by-one-bug that made inserted X/NNN too long
+* Table files with Windows or old Mac linebreaks no longer break ortholog set generation
+* Whitespace in file names no longer breaks commands like `fastatranslate`
+* Updated README because it was still talking about native OrthoDB tables w/o reformatting; also added info for newer OrthoDB versions
+
+## [0.5.14]
+
+### Added
+
+* Added `--make-set` option to just generate the set (HMM files and BLAST database) and then quit
+
+### Fixed
+
+* Using `use lib $FindBin::RealBin` now to avoid issues with soft links
+* Can now handle sequence headers with trailing whitespaces correctly (by removing them)
+
+## [0.5.13]
+
+### Fixed
+
+* Fix bug in makeblastdb version check
+* Fix bug in mafft version check
+
+## [0.5.12]
+
+### Added
+
+* Added `--test-deps` option with description to man page
+
+### Fixed
+
+* Fixed dependency version check
+
+## [0.5.11]
+
+### Added
+
+Added a test dataset using a subset of the Orussus abietinus transcriptome
+from 1KITE (http://1kite.org). The dataset is configured in the default config
+file so just starting Orthograph will verify a correct installation.
+
+### Added
+
+* Added `--test-deps` option with description to man page
+
+## [0.5.11]
+
+### Added
+
+Added a test dataset using a subset of the Orussus abietinus transcriptome
+from 1KITE (http://1kite.org). The dataset is configured in the default config
+file so just starting Orthograph will verify a correct installation.
+
+### Changed
+
+- Orthograph now reads ortholog set information from a simple, three-column
+table. The columns must be tab-separated and be:
+  - ortholog gene id
+  - sequence id
+  - taxon name
+Generating such a table from OrthoDB tables is trivial using GNU tools such as
+`cut`. The README was amended accordingly.
+
+- Removed the option `--logfile`. It was rubbish anyway because the reporter
+would overwrite the analyzer logfile unless you changed it, and analyzer and
+reporter create separate, uniquely identifiable logfiles automatically in the
+log dir.
+
+### Fixed
+
+- Fixed a bug in the database backend modules that prevented identical taxon
+names in the database.
+
+## [0.5.10] - 2016-03-01
+
+### Added
+
+- Added `--test-deps` option to check whether dependencies have been properly
+installed in sufficient versions. All dependencies, their required versions
+and download URLs are listed in the README.
+
+### Fixed
+
+- In the database, BLAST results had reversed coordinates (end-start). This
+had no influence on the results.
+
+## [0.5.9] - 2016-02-04
+
+### Added
+
+- Added another tabular output file, non-overlapping-best-reciprocal-hits.txt,
+that contains, well, non-overlapping sequence sections that fulfilled the BRH
+criterion. They may, however, overlap on HMM level (paralogous copies
+perhaps).
+
+### Changed
+
+- Renamed the other tabular output files:
+	* homologous_transcripts.txt is now best-reciprocal-hits.txt
+	* non_redundant_orthologous_transcripts.txt is now summary.txt
+
+- Added e-value column to best-reciprocal-hits.txt table
+
+## [0.5.8] - 2016-02-01
+
+### Changed
+
+- The helper script `summarize_orthograph_results.pl` can now mask internal
+stop codons, clip terminal stop codons and mask selenocystein characters. The
+new options are `-s`, `-t`, and `-u`, respectively.
+
+- The helper script `make-ogs-corresponding.pl` can now run with multiple
+threads using `--num-threads`. This requires the module
+`Parallel::Forkmanager`.
+
+- Changed change log to more sensible format
+
+### Fixed
+
+- orthograph2hamstrad.pl now also accepts directories that were summarized
+using summarize_orthograph_results.pl
+
+- Description is now really optional when uploading a new ortholog set
+
+- Uses ali coordinates instead of env coordinates for everything
+
+
+## [0.5.7] - 2015-11-24
+
+### Changed
+
+- Moved notification on reftaxon skipping to `verbose`, improved wording on
+said message
+
+- Alignment files for ortholog set now contain the reference OGS headers, not
+just database IDs
+
+### Fixed
+
+- Fixed bug in orthograph2hamstrad.pl that prevented summarized data to be
+converted
+
+
+## [0.5.6] - 2015-08-26
+
+### Added
+
+- Added `brh-only` option to restrict mappings to a single transcript per COG
+
+- Added Makefile. Currently has only the target 'doc' to compile a PDF version
+of the manual.
+
+- Added `alignment.err` logfile to capture stderr during HMM generation, for
+troubleshooting
+
+### Changed
+
+- Minor changes
+
+
+## [0.5.5] - 2015-08-04
+
+### Added
+
+- Added option `exonerate-alignment-model`.
+
+- Added length statistics script by Alex V.
+
+### Changed
+
+- Minor changes in example config
+
+- Minor changes in error reporting
+
+### Fixed
+
+- Fixed bug in make-ogs-corresponding for cases where indels result in
+multiple alignments for a single sequence pair
+
+- Fixed COG table import for edge cases where you only have 6 columns
+
+
+## [0.5.4] - 2015-06-17
+
+### Fixed
+
+- Fixed a bug in orthograph2hamstrad converter

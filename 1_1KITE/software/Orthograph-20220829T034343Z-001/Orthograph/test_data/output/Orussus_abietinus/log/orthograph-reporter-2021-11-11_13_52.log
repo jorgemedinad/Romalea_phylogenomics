@@ -1,0 +1,55 @@
+Orthograph: Orthology prediction using a Graph-based,
+Reciprocal Approach with Profile Hidden Markov models
+Copyright 2015 Malte Petersen <mptrsen@uni-bonn.de>
+Version 0.7.1
+
+Using log dir '/home/ajbaker6/environment/software/Orthograph/test_data/output/Orussus_abietinus/log'.
+Fetched      1 rows for HMM alignment score  2084.7 in 0.0 seconds (7.1 %)
+>> Assigned 'gb|GAUJ02026257.1| TSA: Orussus abietinus s7728_L_25080_0_a_6_5_l_3729 transcribed RNA sequence:[translate(2)]' [39:1005] to EOG81ZGXR (hmm 1-967).
+Fetched      1 rows for HMM alignment score  1982.4 in 0.2 seconds (14.3 %)
+>> Assigned 'gb|GAUJ02018754.1| TSA: Orussus abietinus C99715_a_50_0_l_5545 transcribed RNA sequence:[translate(3)]' [10:917] to EOG8B5QS1 (hmm 11-928).
+Fetched      1 rows for HMM alignment score  1849.7 in 0.0 seconds (21.4 %)
+>> Assigned 'gb|GAUJ02018721.1| TSA: Orussus abietinus C99559_a_7_0_l_5310 transcribed RNA sequence:[translate(3)]' [50:941] to EOG89S7T6 (hmm 1-893).
+Fetched      1 rows for HMM alignment score  1160.6 in 0.0 seconds (28.6 %)
+>> Assigned 'gb|GAUJ02016894.1| TSA: Orussus abietinus C91523_a_41_0_l_2077 transcribed RNA sequence:[translate(2)]' [47:673] to EOG80CK49 (hmm 2-636).
+Fetched      1 rows for HMM alignment score  1013.4 in 0.0 seconds (35.7 %)
+>> Assigned 'gb|GAUJ02018796.1| TSA: Orussus abietinus C99879_a_14_0_l_5907 transcribed RNA sequence:[revcomp]:[translate(1)]' [1:574] to EOG8S1VVC (hmm 713-1283).
+Fetched      1 rows for HMM alignment score   977.5 in 0.0 seconds (42.9 %)
+>> Assigned 'gb|GAUJ02025837.1| TSA: Orussus abietinus s734_L_843_0_a_14_3_l_3038 transcribed RNA sequence:[revcomp]:[translate(2)]' [1:468] to EOG8V713R (hmm 422-891).
+Fetched      1 rows for HMM alignment score   977.4 in 0.0 seconds (50.0 %)
+Fetched      1 rows for HMM alignment score   898.4 in 0.0 seconds (57.1 %)
+>> Assigned 'gb|GAUJ02023304.1| TSA: Orussus abietinus s5047_L_8906_0_a_44_7_l_2243 transcribed RNA sequence:[translate(3)]' [79:523] to EOG8QVF0M (hmm 3-439).
+Fetched      1 rows for HMM alignment score   882.2 in 0.0 seconds (64.3 %)
+>> Assigned 'gb|GAUJ02018106.1| TSA: Orussus abietinus C96865_a_23_0_l_3399 transcribed RNA sequence:[revcomp]:[translate(1)]' [60:454] to EOG86T4P2 (hmm 1-395).
+Fetched      1 rows for HMM alignment score   771.0 in 0.0 seconds (71.4 %)
+Fetched      1 rows for HMM alignment score   701.3 in 0.0 seconds (78.6 %)
+>> Assigned 'gb|GAUJ02026033.1| TSA: Orussus abietinus s7526_L_23531_0_a_54_6_l_5751 transcribed RNA sequence:[revcomp]:[translate(2)]' [156:498] to EOG8VX3TG (hmm 1-341).
+Fetched      1 rows for HMM alignment score   422.3 in 0.0 seconds (85.7 %)
+>> No overlap with previous hits: added 'gb|GAUJ02012479.1| TSA: Orussus abietinus C73895_a_3_0_l_709 transcribed RNA sequence:[revcomp]:[translate(1)]' [1:236] to EOG8S1VVC (hmm 431-667).
+Fetched      1 rows for HMM alignment score    33.2 in 0.0 seconds (92.9 %)
+Fetched      1 rows for HMM alignment score    29.8 in 0.0 seconds (100.0 %)
+
+####################################
+## Finished fetching from the database.
+## Starting output.
+####################################
+## Finalizing EOG80CK49... (1 of 9)
+Mapped 1 transcripts to EOG80CK49 (discarded 0 transcripts)
+## Finalizing EOG81ZGXR... (2 of 9)
+Mapped 1 transcripts to EOG81ZGXR (discarded 0 transcripts)
+## Finalizing EOG86T4P2... (3 of 9)
+Mapped 1 transcripts to EOG86T4P2 (discarded 0 transcripts)
+## Finalizing EOG89S7T6... (4 of 9)
+Mapped 1 transcripts to EOG89S7T6 (discarded 0 transcripts)
+## Finalizing EOG8B5QS1... (5 of 9)
+Mapped 1 transcripts to EOG8B5QS1 (discarded 0 transcripts)
+## Finalizing EOG8QVF0M... (6 of 9)
+Mapped 1 transcripts to EOG8QVF0M (discarded 0 transcripts)
+## Finalizing EOG8S1VVC... (7 of 9)
+Mapped 2 transcripts to EOG8S1VVC (discarded 0 transcripts)
+## Finalizing EOG8V713R... (8 of 9)
+Mapped 1 transcripts to EOG8V713R (discarded 0 transcripts)
+## Finalizing EOG8VX3TG... (9 of 9)
+Mapped 1 transcripts to EOG8VX3TG (discarded 0 transcripts)
+## Orthograph report for Orussus_abietinus completed in 2.30 total seconds
+## Mapped putatively orthologous transcripts to 9 clusters

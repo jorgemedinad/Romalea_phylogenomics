@@ -1,0 +1,1545 @@
+#!/usr/bin/env perl
+#--------------------------------------------------
+# This file is part of Orthograph.
+# Copyright 2014 Malte Petersen <mptrsen@uni-bonn.de>
+# 
+# Orthograph is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+# 
+# Orthograph is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along with
+# Orthograph. If not, see http://www.gnu.org/licenses/.
+#-------------------------------------------------- 
+
+# Pragmas
+use strict;         # make me write clean code
+use warnings;       # cry if something seems odd
+use autodie;        # die automatically on I/O functions
+
+# Core modules
+use Archive::Tar;   # handling tar archives
+use Carp;           # carp and croak: warn and die with call stack
+use Config;         # allows checking for system configuration in $Config
+use DBI;            # database interface 
+use Data::Dumper;   # great for debugging
+use Digest::SHA;    # SHA hashing: good idea or not?
+use File::Basename; # provides basename()
+use File::Path qw( make_path remove_tree ); # this also uses File::Spec
+use File::Temp;     # temporary files
+use FindBin;        # locate the dir of this script during compile time
+use IO::Dir;        # object-oriented access to dirs
+use IO::File;       # object-oriented access to files
+
+# Custom modules
+use lib $FindBin::RealBin; # $RealBin is the directory of the original script
+use IO::Tee;               # not custom, but supplied because from CPAN
+use Seqload::Fasta;        # object-oriented access to fasta files
+use Wrapper::Hmmsearch;    # object-oriented interface to hmmsearch
+use Wrapper::Blastp;       # object-oriented interface to blastp
+use Wrapper::Swipe;        # object-oriented interface to swipe
+use Orthograph::Functions; # functions for all Orthograph tools
+use Orthograph::Config;    # configuration in global hashref $config; also handles command line arguments
+use Orthograph::Version;   # holds the version number
+
+my $program_name = 'Orthograph';
+$0 = $program_name;
+my $version = $Orthograph::Version::version;
+# this message will be printed later when we have a log file handle
+my $message = "$program_name: Orthology prediction using a Graph-based,\n" .
+	"Reciprocal Approach with Profile Hidden Markov models\n" .
+	"Copyright 2020 Malte Petersen <mptrsen\@uni-bonn.de>\n" .
+	"Version $version\n\n";
+my $program_file = $FindBin::Script;
+
+#--------------------------------------------------
+# # Copy configuration
+#-------------------------------------------------- 
+my $config = $Orthograph::Config::config;
+
+#--------------------------------------------------
+# # The user only wants help
+#-------------------------------------------------- 
+if ($config->{'help'}) {
+	Orthograph::Functions::print_usage($config) and exit;
+}
+
+#--------------------------------------------------
+# # The user only wants the version
+#-------------------------------------------------- 
+if ($config->{'version'}) {
+	print "$program_name version $version\n" and exit;
+}
+
+#--------------------------------------------------
+# # Database settings
+#-------------------------------------------------- 
+# which database backend do we use?
+my $database_backend = $config->{'database-backend'};
+my $use_mysql        = $database_backend =~ /mysql/i  ? 1 : 0;
+my $use_sqlite       = $database_backend =~ /sqlite/i ? 1 : 0;
+my $database         = undef;
+my $attached_db_file = undef;
+# load the database modules at runtime, depending on the backend setting
+if ($use_mysql)      {
+	require Wrapper::Mysql;
+	$database = $config->{'mysql-database'};
+}
+elsif ($use_sqlite) {
+	require Wrapper::Sqlite;
+	$database = $config->{'sqlite-database'};
+	$attached_db_file = Wrapper::Sqlite::attached_db_file();
+}
+
+# make sure we can use Parallel::ForkManager
+
+
+#--------------------------------------------------
+# # Programs in the order of their use
+#-------------------------------------------------- 
+my $alignment_program          = $config->{'alignment-program'};
+my $hmmbuild_program           = $config->{'hmmbuild-program'};
+my $translate_program          = $config->{'translate-program'};
+my $hmmsearch_program          = $config->{'hmmsearch-program'};
+my $blast_program              = $config->{'blast-program'};
+my $swipe_program              = $config->{'swipe-program'};
+my $exonerate_program          = $config->{'exonerate-program'};
+my $makeblastdb_program        = $config->{'makeblastdb-program'};
+my $rev_search_algorithm       = $config->{'reverse-search-algorithm'};
+
+#--------------------------------------------------
+# # These variables can be set in the config file
+#-------------------------------------------------- 
+my $aaoutdir                   = $config->{'aaoutdir'};
+my $backup                     = $config->{'backup'};
+my $blast_max_hits             = $config->{'blast-max-hits'};
+my $rev_search_outdir          = $config->{'reverse-search-output-dir'};
+my $blast_evalue_threshold     = $config->{'blast-evalue-threshold'};
+my $blast_score_threshold      = $config->{'blast-score-threshold'};
+my $clear_database             = $config->{'clear-database'};
+my $clear_files                = $config->{'clear-files'};
+my $configfile                 = $config->{'configfile'};
+my $continue                   = $config->{'continue'};
+my $debug                      = $config->{'debug'};
+my $input_file                 = $config->{'input-file'};
+my $input_is_amino_acid        = $config->{'input-is-amino-acid'};
+my $genetic_code               = $config->{'genetic-code'};
+my $hmmfile                    = $config->{'hmmfile'};
+my $hmmoutdir                  = $config->{'hmmsearch-output-dir'};
+my $hmmsearch_evalue_threshold = $config->{'hmmsearch-evalue-threshold'};
+my $hmmsearch_score_threshold  = $config->{'hmmsearch-score-threshold'};
+my $max_blast_searches         = $config->{'max-blast-searches'};
+my $makeset                    = $config->{'make-set'};
+my $ntoutdir                   = $config->{'ntoutdir'};
+my $num_threads                = $config->{'num-threads'};
+my $orthoid_list_file          = $config->{'cog-list-file'};
+my $outdir                     = $config->{'output-directory'};
+my $orthoset                   = $config->{'ortholog-set'};
+my $preparedb                  = $config->{'prepare'};
+my $quiet                      = $config->{'quiet'};
+my $reftaxa                    = $config->{'reference-taxa'};
+# substitution character for selenocysteine, which normally leads to blast freaking out
+my $u_subst                    = $config->{'substitute-u-with'};
+my $sets_dir                   = $config->{'sets-dir'};
+my $species_name               = $config->{'species-name'};
+my $tmpdir                     = $config->{'temp-dir'};
+my $testdeps                   = $config->{'test-deps'};
+my $verbose                    = $config->{'verbose'};
+
+# MySQL settings
+my $db_dbname                  = $config->{'mysql-database'};
+my $db_dbpwd                   = $config->{'mysql-password'};
+my $db_dbserver                = $config->{'mysql-server'};
+my $db_dbuser                  = $config->{'mysql-username'};
+
+# these settings are usually not changed by the user
+my $db_table_blast             = $config->{'db_table_blast'};
+my $db_table_blastdbs          = $config->{'db_table_blastdbs'};
+my $db_table_ests              = $config->{'db_table_ests'};
+my $db_table_hmmsearch         = $config->{'db_table_hmmsearch'};
+my $db_table_log_evalues       = $config->{'db_table_log_evalues'};
+my $db_table_set_details       = $config->{'db_table_set_details'};
+my $db_table_aaseqs            = $config->{'db_table_aaseqs'};
+my $db_table_seqpairs          = $config->{'db_table_sequence_pairs'};
+my $db_table_taxa              = $config->{'db_table_taxa'};
+my $db_table_orthologs         = $config->{'db_table_orthologs'};
+
+#--------------------------------------------------
+# # More variables
+#-------------------------------------------------- 
+my $EMPTY                = q{};
+my $alndir               = $EMPTY;
+my $blastcount           = 0;
+my $blastdb              = $EMPTY;
+my $blastdir             = $EMPTY;
+my $hitcount_total  = 0;
+my $count                = 0;
+my $hmmcount             = 0;
+my $hmmdir               = $EMPTY;
+my $hmmresultfileref     = $EMPTY;
+my $list_of_wanted_orthoids = $EMPTY;
+my $listspecies          = 0;
+my $logdir               = $EMPTY;
+my $logfile              = $EMPTY;
+my $db_col_aaseq         = 'aa_seq';
+my $db_col_blastdbpath   = 'blastdb_path';
+my $db_col_date          = 'date';
+my $db_col_digest        = 'digest';
+my $db_col_evalue        = 'evalue';
+my $db_col_end           = 'end';
+my $db_col_env_end       = 'env_end';
+my $db_col_env_start     = 'env_start';
+my $db_col_hmm_end       = 'hmm_end';
+my $db_col_hmm_start     = 'hmm_start';
+my $db_col_log_evalue    = 'log_evalue';
+my $db_col_hdr           = 'header';
+my $db_col_hmm           = 'hmm';
+my $db_col_id            = 'id';
+my $db_col_longname      = 'longname';
+my $db_col_name          = 'name';
+my $db_col_orthoid       = 'ortholog_gene_id';
+my $db_col_query         = 'query';
+my $db_col_score         = 'score';
+my $db_col_seq           = 'sequence';
+my $db_col_seqpair       = 'sequence_pair';
+my $db_col_setid         = 'setid';
+my $db_col_start         = 'start';
+my $db_col_target        = 'target';
+my $db_col_taxid         = 'taxid';
+my $db_col_type          = 'type';
+my $db_col_taxon         = 'taxon';
+my $db_col_user          = 'user';
+my $db_dbi               = "dbi:mysql:$db_dbname:$db_dbserver";
+my $num_bp               = 0;
+my $num_ests             = 0;
+my $num_hmms             = 0;
+my $orthocount           = 0;
+my $protfile             = $EMPTY;
+my $set_id               = 0;
+my $species_id           = 0;
+my $stderr               = undef;
+my $stdout               = undef;
+my $t0;  # used for timing 
+my $t1;  # used for timing 
+my $timestamp_diff       = 0;
+my $timestamp_end        = 0; # will hold the time at the end
+my $timestamp_start      = scalar time;
+my @lt                   = localtime time;
+my $timestring           = sprintf "%04d-%02d-%02d_%02d:%02d", $lt[5] + 1900, $lt[4] + 1, $lt[3], $lt[2], $lt[1];
+my @backup               = ( );
+my @hmmfiles             = ( );
+my @reftaxa              = ( );
+my @seqobjs              = ( );
+
+# debug is also verbose
+if ($debug) {
+	$verbose = 1; 
+}
+
+# report configuration
+if ($verbose) {
+	$message .= "Using the following configuration settings:\n";
+	foreach (sort keys %$config) {
+		$message .= sprintf "%s = %s\n", $_, $config->{$_} if defined $config->{$_};
+	}
+	$message .= "\n";
+}
+
+#--------------------------------------------------
+# # see whether Parallel::ForkManager is installed
+#-------------------------------------------------- 
+my $forkmanager = eval {
+	require Parallel::ForkManager;
+	Parallel::ForkManager->new($num_threads);
+};
+unless ($forkmanager) {
+	print "Error: Parallel::ForkManager not usable. Did you install the Perl module?\n" and exit 1;	
+}
+
+#--------------------------------------------------
+# # Special case: Prepare the database by dropping and recreating all
+# # tables if requested, then exit
+#-------------------------------------------------- 
+if ($preparedb) {
+	local $| = 1;
+  print "Setting database $attached_db_file to a clean slate... ";
+	local $| = 0;
+  preparedb();
+  print "OK\nDatabase now ready to run $program_name.\n";
+  exit;
+}
+
+#--------------------------------------------------
+# # Normal run. Input error checking, reporting etc
+#-------------------------------------------------- 
+
+# exit here if we are just to test dependencies
+if ($testdeps) {
+	Orthograph::Functions::test_dependencies($translate_program, $alignment_program, $hmmbuild_program, $makeblastdb_program, $hmmsearch_program, $blast_program, $exonerate_program, $swipe_program);
+	exit;
+}
+
+# otherwise, continue
+intro();
+
+# get the set id
+$set_id = get_set_id($orthoset)
+	or print $stderr "Warning: Could not get set id from database: $DBI::errstr\n";
+
+# prepare the HMMs
+$hmmdir = make_hmms($orthoset);
+# prepare the BLAST database
+$blastdb = make_blastdb($set_id);
+
+# exit here if we were only supposed to create the set
+exit if $makeset;
+
+#--------------------------------------------------
+# # create list of reference taxa and HMM files 
+#-------------------------------------------------- 
+if ($reftaxa) { @reftaxa = split(/\s*,\s*/, $reftaxa) }
+else {
+	@reftaxa = get_taxa_in_set($set_id)
+		or print $stderr "Warning: Could not get reference taxa from database: $DBI::errstr\n"
+}
+@hmmfiles = hmmlist($hmmdir);
+$num_hmms = scalar(@hmmfiles);
+
+# read the list of orthoids from file
+if ($orthoid_list_file) {
+	$list_of_wanted_orthoids = Orthograph::Functions::file2arrayref($orthoid_list_file);
+}
+
+
+unless ($quiet) {
+	print $stdout "Using temporary directory '$tmpdir'.\n"
+		if $tmpdir;
+  print $stdout "Using HMM dir '$hmmdir' with ", scalar(@hmmfiles), " HMM files.\n" 
+    if $hmmdir;
+  print $stdout "Using HMM file '$hmmfile'.\n" 
+    if $hmmfile;
+  print $stdout "HMMsearch e-Value cutoff: $hmmsearch_evalue_threshold.\n" 
+    if $hmmsearch_evalue_threshold;
+  print $stdout "Score cutoff: $hmmsearch_score_threshold.\n"
+    if $hmmsearch_score_threshold;
+}
+
+#--------------------------------------------------
+# # translate the ESTs to protein, feed that stuff to the database
+#-------------------------------------------------- 
+if ($input_is_amino_acid) {
+	print $stdout "Input specified to be amino acid, not translating\n";
+	$protfile = $input_file;
+}
+else {
+	$protfile = translate_est(File::Spec->catfile($input_file));
+}
+
+# clear database of data from the same species
+if ($clear_database) {
+	print $stdout "Clearing database of previous results from '$species_name'...\n" unless $quiet;
+	preparedb() or print $stderr "Warning: Failed to clear database for species $species_name: $DBI::errstr\n";
+	# re-insert the taxon into the species table
+	$species_id = insert_species_info($species_name)
+		or fail_and_exit("Warning: Failed to get species id: $DBI::errstr");
+	print $stdout "Got taxon id $species_id for '$species_name'\n" unless $quiet;
+
+	# have the wrapper modules use the real table names
+	get_real_table_names($species_id);
+
+}
+
+unless ($continue) {
+	# store est data into the database:
+	printf $stdout "Storing nucleotide sequences to database '%s'%s...\n",
+		$use_sqlite ? $attached_db_file : $db_dbname,
+		$use_sqlite ? '' : " on $db_dbserver"
+			unless $quiet;
+
+	# LOAD DATA INFILE; third arg must be ref to array of column names
+	$t0 = scalar time;
+	load_data_infile($input_file, $db_table_ests, 2, [ $db_col_digest, $db_col_taxid, $db_col_type, $db_col_date, $db_col_hdr, $db_col_seq ]);
+	$t1 = scalar time;
+	printf $stdout "Transaction took %.1f seconds.\n", $t1 - $t0 unless $quiet;
+
+	# store translated est data into the database:
+	printf $stdout "Storing translated sequences to database '%s'%s...\n",
+		$use_sqlite ? $attached_db_file : $db_dbname,
+		$use_sqlite ? '' : " on $db_dbserver"
+			unless $quiet;
+
+	# LOAD DATA INFILE; third arg must be ref to array of column names
+	$t0 = scalar time;
+	load_data_infile($protfile, $db_table_ests, 1, [ $db_col_digest, $db_col_taxid, $db_col_type, $db_col_date, $db_col_hdr, $db_col_seq ]);
+	$t1 = scalar time;
+	printf $stdout "Transaction took %.1f seconds.\n", $t1 - $t0 unless $quiet;
+
+	
+}
+
+
+# get number of sequences for this species, report or die
+$num_ests = get_number_of_ests_for_specid($species_id);
+if ($num_ests != 0) {
+	printf($stdout "%d sequences of %s in %s '%s' on %s. \n",
+		$num_ests,
+		$species_name,
+		$use_mysql ? 'database' : 'attached database',
+		$use_mysql ? $db_dbname : $attached_db_file,
+		$db_dbserver) unless $quiet;
+}
+else {
+	print $stderr "No sequences found for taxon id $species_id. Something went wrong. Check your input. Exiting.\n" and exit(1);
+}
+
+# get the transcripts with their new ID back from the database. TODO is this efficient?
+$protfile = get_transcripts($species_id, 1);
+
+
+#--------------------------------------------------
+# # Setup the Orthograph modules. These are all class methods.
+#-------------------------------------------------- 
+
+# verbose output 
+if ($verbose) {
+	Wrapper::Hmmsearch->verbose(1);
+	Wrapper::Blastp->verbose(1);
+	Wrapper::Swipe->verbose(1);
+}
+
+# debug output, sets verbose automatically
+if ($debug) {
+	Wrapper::Hmmsearch->debug(1);
+	Wrapper::Blastp->debug(1);
+	Wrapper::Swipe->debug(1);
+}
+
+# e-value and score thresholds
+Wrapper::Hmmsearch->evalue_threshold($hmmsearch_evalue_threshold)
+	if $hmmsearch_evalue_threshold;
+Wrapper::Blastp->evalue_threshold($blast_evalue_threshold)
+	if $blast_evalue_threshold;
+Wrapper::Swipe->evalue_threshold($blast_evalue_threshold)
+	if $blast_evalue_threshold;
+Wrapper::Hmmsearch->score_threshold($hmmsearch_score_threshold)
+	if $hmmsearch_score_threshold;
+Wrapper::Blastp->score_threshold($blast_score_threshold)
+	if $blast_score_threshold;
+Wrapper::Swipe->score_threshold($blast_score_threshold)
+	if $blast_score_threshold;
+
+# maximum number of hits to save for blast
+# this is ignored by swipe
+Wrapper::Blastp->max_hits($blast_max_hits)
+	if $blast_max_hits;
+
+# number of CPU threads to use
+Wrapper::Hmmsearch->num_threads(1);
+Wrapper::Blastp->num_threads(1);
+Wrapper::Swipe->num_threads(1);
+
+# the output directories
+Wrapper::Hmmsearch->outdir($hmmoutdir);
+Wrapper::Blastp->outdir($rev_search_outdir);
+Wrapper::Swipe->outdir($rev_search_outdir);
+
+# the programs
+Wrapper::Hmmsearch->searchprog($hmmsearch_program);
+Wrapper::Blastp->searchprog($blast_program);
+Wrapper::Swipe->searchprog($swipe_program);
+
+# shiny new blastp object
+my $blastobj = $rev_search_algorithm eq 'blast' ? Wrapper::Blastp->new($blastdb) : Wrapper::Swipe->new($blastdb);
+
+
+#--------------------------------------------------
+# # HMMsearch the protfile using all HMMs
+#-------------------------------------------------- 
+printf($stdout "HMMsearching the translated sequences using all %d HMMs in %s...\n", scalar(@hmmfiles), $hmmdir)
+	unless $quiet;
+$hmmcount = 0;
+
+my $pm = Parallel::ForkManager->new($num_threads);
+
+HMMFILE:
+foreach my $hmmfile (@hmmfiles) {
+	# count up
+	++$hmmcount;
+
+	# Fork and return the pid for the child
+	my $pid = $pm->start and next;
+
+	$blastcount = 0;	# reset counter
+
+	# create new hmmobject with a hmm file, should have all the necessary info for doing hmmsearch
+	my $hmmobj = Wrapper::Hmmsearch->new($hmmfile); 
+
+	# skip this hmm if it concerns a ortholog group that we didn't want
+	my $orthoid = $hmmobj->hmmname();
+	if ($list_of_wanted_orthoids and not grep { /$orthoid/ } @$list_of_wanted_orthoids) {
+		print $stdout "Skipping $orthoid\n" if $verbose;
+		$pm->finish;
+		next;
+	}
+
+	# now do the hmmsearch on the protfile
+	$hmmobj->search($protfile);
+
+	# count the hmmsearch hits
+	printf($stdout "Done searching for %s (%d/%d, %2.1f%% complete)\n", 
+		basename($hmmobj->hmmfile()),
+		$hmmcount,
+		$num_hmms,
+		($hmmcount * 100 / $num_hmms)) unless $quiet;
+	printf $stdout "  %d first-tier hit%s\n",
+		$hmmobj->hitcount(),
+		$hmmobj->hitcount() > 1 ? 's' : '',
+		if $verbose;
+	# and do not care further with HMM files that did not return any result
+	if ($hmmobj->hitcount() == 0) { 
+		$pm->finish;
+		next HMMFILE;
+	}
+
+	# print list of hits if verbose
+	if ($verbose) {
+		my $hits = $hmmobj->hits_arrayref();
+		my $hmmsearch_hits_above_threshold = 0;
+		for (my $i = 0; $i < scalar @$hits; $i++) {
+			printf $stdout "     [%d] %s [%d:%d] (hmm %d:%d), e-value %2.1e, score %.1f\n",
+				$i + 1,
+				$hits->[$i]->{'target'},
+				$hits->[$i]->{'env_start'},
+				$hits->[$i]->{'env_end'},
+				$hits->[$i]->{'hmm_start'},
+				$hits->[$i]->{'hmm_end'},
+				$hits->[$i]->{'evalue'},
+				$hits->[$i]->{'score'},
+			;
+			if ($hits->[$i]->{'score'} >= $hmmsearch_score_threshold and $hits->[$i]->{'evalue'} <= $hmmsearch_evalue_threshold) { $hmmsearch_hits_above_threshold++ }
+		}
+		printf $stdout "  %d hit%s within thresholds (e-value: %.1e, score: %.1f)\n",
+			$hmmsearch_hits_above_threshold,
+			$hmmsearch_hits_above_threshold > 1 ? 's' : '',
+			$hmmsearch_evalue_threshold,
+			$hmmsearch_score_threshold;
+	}
+	#--------------------------------------------------
+	# # push results to database 
+	#-------------------------------------------------- 
+	my $count = insert_results_into_table($db_table_hmmsearch, $hmmobj->hits_arrayref());
+	printf $stdout "     ... pushed %d hit%s to database.\n",
+		$count,
+		$count > 1 ? 's' : ''
+			if $verbose;
+
+	# no hits above the thresholds
+	if ($count == 0) { 
+		print $stdout "         not conducting reciprocal search.\n" if $verbose;
+		$pm->finish;
+		next;
+	}
+	
+	#--------------------------------------------------
+	# # the reciprocal search
+	#-------------------------------------------------- 
+
+	# get hmmsearch results from database; use the first array item since they all share the query (HMM) ID 
+	my @hmmresults = get_hmmresults($hmmobj->hits_arrayref->[0]{'query'}, $species_id);
+
+	# don't do too many blast searches...
+	my $max = scalar(@hmmresults) >= $max_blast_searches ? $max_blast_searches : scalar(@hmmresults);
+
+	HMMRESULT:
+	for (my $n = 0; $n < $max; ++$n) { 
+ 		++$count;
+
+		# the hmmsearch table id for this result
+		my $hmmsearch_id = $hmmresults[$n]->[4];
+
+		# create a new fasta file for the blast search
+		my $tmpfile = write_sequence_to_tempfile($hmmresults[$n], $hmmobj->hmmfile);
+
+		#--------------------------------------------------
+		# # run reverse search 
+		#-------------------------------------------------- 
+		
+		# generate a blast output file name from the HMM name and the hit number
+		my $blastoutfile = generate_blast_output_filename($hmmobj->hmmname, $hmmresults[$n]);
+
+		# do the blastp search
+		$blastobj->search($tmpfile, $blastoutfile);
+
+		printf($stdout "  %4d second-tier hit%s detected for [%d] against %s, e-value below %2.1e\n",
+			$blastobj->hitcount,
+			$blastobj->hitcount > 1 ? 's' : '',
+			$n + 1,
+			basename($blastdb),
+			$blast_evalue_threshold) if $verbose;
+
+		$hitcount_total += $blastobj->hitcount();
+
+		# skip to next if BLAST finds nothing
+		if ($blastobj->hitcount() == 0) {
+			$pm->finish;
+			next HMMRESULT;
+		}
+
+		#print Dumper $blastobj;
+
+		# insert the blast results into the db. 4-argument form.
+		my $count = insert_results_into_table($db_table_blast, $blastobj->hits_arrayref, basename($blastdb), $hmmsearch_id);
+		printf $stdout "         ... pushed %d hit%s to database.\n",
+			$count,
+			$count > 1 ? 's' : ''
+				if $verbose;
+	} 
+
+	if ($hmmcount <= scalar(@hmmfiles) / 100) {
+		print $stdout "\n(Don't be alarmed, the sequence identifiers are SHA256-hashed but their original label is preserved in the database and will be output at the end. Don't be alarmed)\n\n"
+			if $verbose;
+	}
+
+	$pm->finish;
+
+}	# End hmmlist loop
+
+$pm->wait_all_children;
+
+# report, end the program
+$timestamp_end = scalar time();
+$timestamp_diff = $timestamp_end - $timestamp_start;
+printf $stdout "\n%s analysis for %s completed in %d seconds.\n", $program_name, $species_name, $timestamp_diff;
+printf $stdout "Now run %s and go look in your output directory %s.\n", "'orthograph-reporter'", $outdir;
+
+# successfully exit :)
+exit(0);
+
+
+###################################################
+# # Functions follow
+###################################################
+
+sub usage {
+	my $usage = "Usage: $0 [OPTIONS] INPUTFILE\n";
+	$usage   .= "Options:\n";
+	foreach my $opt (sort { $a cmp $b } keys %$config) {
+		next if $opt =~ /db_/;
+		$usage .= "\t--$opt\n";
+	}
+	$usage .= "See the documentation for a description.\n";
+	return $usage;
+}
+
+sub insert_species_info {
+	if ($use_mysql) {
+		return Wrapper::Mysql::insert_species_info(@_)
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::insert_species_info(@_)
+	}
+}
+
+sub get_real_table_names {
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_real_table_names(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_real_table_names(@_);
+	}
+}
+
+# Sub: intro
+# Checks input, file/dir presence, etc.
+# Returns True if everything is OK.
+sub intro {
+	# first things first: 
+	# test whether dependencies exist where specified and whether versions are sufficient
+	Orthograph::Functions::test_dependencies($translate_program, $alignment_program, $hmmbuild_program, $makeblastdb_program, $hmmsearch_program, $blast_program, $exonerate_program, $swipe_program);
+
+	# construct output directory paths
+	# the output directory. create if it does not exist.
+	# outdir may be defined in the config file
+	$outdir = defined($outdir) ? $outdir : File::Spec->catdir('.', $species_name);
+	if (-d $outdir) {
+		# no IO::Tee because the log dir has not been created yet 
+		$message .= "Using output dir '$outdir'.\n" unless $quiet;
+	}
+	else {
+		# no IO::Tee because the log dir has not been created yet 
+		$message .= "Output dir '$outdir' does not exist, creating...\n" unless $quiet;
+		Orthograph::Functions::makedir($outdir) or die "Fatal: Failed to create output directory '$outdir'\n";
+	}
+	# create new directory to hold the temporary files
+	if (-d $tmpdir) {
+		$message .= "Using tempdir '$tmpdir'.\n" unless $quiet;
+	}
+	else {
+		$message .= "Tempdir '$tmpdir' does not exist, creating...\n" unless $quiet;
+		Orthograph::Functions::makedir($tmpdir) or die "Fatal: Failed to create temporary directory '$tmpdir'\n";
+	}
+
+	# the other dirs
+	$aaoutdir = File::Spec->catdir($outdir, $aaoutdir);
+	$ntoutdir = File::Spec->catdir($outdir, $ntoutdir);
+	$hmmoutdir = defined($hmmoutdir) ? File::Spec->catdir($outdir, $hmmoutdir) : File::Spec->catdir($outdir, basename($hmmsearch_program));
+  $rev_search_outdir = defined($rev_search_outdir) ? File::Spec->catdir($outdir, $rev_search_outdir) : File::Spec->catdir($outdir, basename($blast_program));
+
+	# setup the log file
+	$logdir = File::Spec->catdir($outdir, 'log');
+	if (-d $logdir) {
+		$message .= "Using log dir '$logdir'.\n" unless $quiet;
+	}
+	else {
+		$message .= "Log dir '$logdir' does not exist, creating...\n" unless $quiet;
+		Orthograph::Functions::makedir($logdir) or die "Fatal: Failed to create log directory $logdir\n";
+	}
+	$logfile = File::Spec->catfile($logdir,  'orthograph-analyzer-' . $timestring . '.log');
+	my $logfh = IO::File->new($logfile, 'w') or die "Fatal: Could not create log file '$logfile': $!\n";
+	$stdout = IO::Tee->new(
+		\*STDOUT,
+		$logfh,
+	);
+	$stderr = IO::Tee->new(
+		\*STDERR,
+		$logfh,
+	);
+	# print the messages that were collected so far
+	print $stdout $message;
+	print $stdout "Using log file '$logfile'.\n";
+
+	# pass the new stdout and stderr filehandles to the database modules for
+	# their output
+	pass_stderr($stderr);
+	pass_stdout($stdout);
+
+	print $stderr "Fatal: Species name needed (--species-name NAME)!\n" and exit(1)
+		unless ($species_name);
+	
+	print $stderr "Fatal: Ortholog set name required (--ortholog-set SETNAME)!\n" and exit(1)
+		unless ($orthoset);
+
+	# mutually exclusive options
+	print $stderr "Fatal: Can't operate in both verbose and quiet mode\n" and exit(1)
+		if ($verbose and $quiet);
+
+	# the alignment directory (for ortholog set creation)
+	unless ($alndir) { $alndir = File::Spec->catdir($sets_dir, $orthoset, 'aln') }
+	if (-d $alndir) {
+		print $stdout "Alignment dir '$alndir' exists.\n" unless $quiet;
+	}
+	else {
+		print $stdout "Alignment dir '$alndir' does not exist, creating...\n" unless $quiet;
+		Orthograph::Functions::makedir($alndir) or print $stderr "Fatal: Failed to create directory $alndir\n" and exit(1);
+	}
+
+	# the HMM directory
+	unless ($hmmdir) { $hmmdir = File::Spec->catdir($sets_dir, $orthoset, 'hmms') }
+	if (-d $hmmdir) {
+		print $stdout "HMM dir '$hmmdir' exists.\n" unless $quiet;
+	}
+	else {
+		print $stdout "HMM dir '$hmmdir' does not exist, creating...\n" unless $quiet;
+		Orthograph::Functions::makedir($hmmdir) or print $stderr "Fatal: Failed to create directory $hmmdir\n" and exit(1);
+	}
+
+	# the BLAST database directory
+	unless ($blastdir) { $blastdir = File::Spec->catdir($sets_dir, $orthoset, 'blast') }
+	if (-d $blastdir) {
+		print $stdout "BLAST database dir '$blastdir' exists.\n" unless $quiet;
+	}
+	else {
+		print $stdout "BLAST database dir '$blastdir' does not exist, creating...\n" unless $quiet;
+		Orthograph::Functions::makedir($blastdir) or print $stderr "Fatal: Failed to create directory $blastdir\n" and exit(1);
+	}
+
+	# the EST file
+	if (-e $input_file) {
+		print $stdout "EST file $input_file exists.\n" unless $quiet;
+	}
+	else {
+		print $stderr "Fatal: EST file $input_file does not exist!\n" and exit(1);
+	}
+
+	# the HMMsearch output directory
+	if (-d $hmmoutdir) {
+		print $stdout "HMMsearch output dir '$hmmoutdir' exists.\n" unless $quiet;
+		if ($clear_files) {
+			Orthograph::Functions::cleardir($hmmoutdir);
+			print $stdout "Purged HMMsearch output dir '$hmmoutdir' of old result files.\n" unless $quiet;
+		}
+		elsif ($backup) {
+			schedule_for_backup($hmmoutdir);
+		}
+	}
+	else {
+		print $stdout "HMMsearch output dir '$hmmoutdir' does not exist, creating...\n" unless $quiet;
+		Orthograph::Functions::makedir($hmmoutdir) or print $stderr "Fatal: Failed to create directory $hmmoutdir\n" and exit(1);
+	}
+
+  # the reverse search output directory
+  if (-d $rev_search_outdir) {
+    print $stdout "Reverse search output dir '$rev_search_outdir' exists.\n" unless $quiet;
+		if ($clear_files) {
+			Orthograph::Functions::cleardir($rev_search_outdir);
+			print $stdout "Purged reverse search output dir '$rev_search_outdir' of old result files.\n" unless $quiet;
+		}
+		elsif ($backup) {
+			schedule_for_backup($rev_search_outdir);
+		}
+  }
+  else {
+    print $stdout "Reverse search output dir '$rev_search_outdir' does not exist, creating...\n" unless $quiet;
+    Orthograph::Functions::makedir($rev_search_outdir) or print $stderr "Fatal: Failed to create directory $rev_search_outdir\n" and exit(1);
+  }
+	# the aa output directory
+	if (-d $aaoutdir) {
+		print $stdout "AA output dir '$aaoutdir' exists.\n" unless $quiet;
+		if ($clear_files) {
+			Orthograph::Functions::cleardir($aaoutdir);
+			print $stdout "Purged AA output dir '$aaoutdir' of old result files.\n" unless $quiet;
+		}
+		elsif ($backup) {
+			schedule_for_backup($aaoutdir);
+		}
+	}
+	else {
+		print $stdout "AA output dir '$aaoutdir' does not exist, creating...\n" unless $quiet;
+		Orthograph::Functions::makedir($aaoutdir) or print $stderr "Fatal: Failed to create directory $aaoutdir\n" and exit(1);
+	}
+	# the nt output directory
+	if (-d $ntoutdir) {
+		print $stdout "NT output dir '$ntoutdir' exists.\n" unless $quiet;
+		if ($clear_files) {
+			Orthograph::Functions::cleardir($ntoutdir);
+			print $stdout "Purged nt output dir '$ntoutdir' of old result files.\n" unless $quiet;
+		}
+		elsif ($backup) {
+			schedule_for_backup($ntoutdir);
+		}
+	}
+	else {
+		print $stdout "NT output dir '$ntoutdir' does not exist, creating...\n" unless $quiet;
+		Orthograph::Functions::makedir($ntoutdir) or print $stderr "Fatal: Failed to create directory $ntoutdir\n" and exit(1);
+	}
+
+	# check whether the database structure exists
+	if (!db_structure_present()) {
+		fail_and_exit("$program_name database structure not present! Did you forget to run `orthograph-manager -create`?");
+	}
+
+
+	# do the backup; create a tarball if desired
+	print $stdout "Backing up old output files...\n" unless $quiet;
+	if ($debug) { printf "%s\n", $_ foreach @backup }
+	# don't create an empty tarball
+	if (@backup) {
+		my $tarfile = create_tarball(@backup);
+		printf($stdout "Old output files backed up in '%s' (%d files).\n", $tarfile, scalar @backup) unless $quiet;
+		undef(@backup);	# not needed anymore
+		undef($tarfile);
+	}
+	if ($clear_files) {
+		# empty the directories
+		Orthograph::Functions::cleardir($hmmoutdir);
+		Orthograph::Functions::cleardir($rev_search_outdir);
+		Orthograph::Functions::cleardir($aaoutdir);
+	}
+
+	# does the set exist?
+	# TODO rewrite this part using parametrized queries to protect from SQL injections?
+	unless ( set_exists($orthoset) ) {
+		printf "Fatal: Set '$orthoset' does not exist in database '$db_dbname'. Typo in config file $configfile? Use orthograph-manager first to set up your ortholog sets. Ask your administrator.\n",
+			$orthoset,
+			$use_mysql ? $db_dbname : $attached_db_file,
+			$configfile
+		;
+		exit 1;
+	}
+
+	# everything is fine
+	return 1;
+}
+
+# Sub: hmmlist
+# Expects: scalar string directory path
+# Returns: array hmmfiles
+sub hmmlist {
+	my $hmmdir = shift;
+	if (-e $hmmdir) {
+		my $dir = IO::Dir->new(File::Spec->catdir($hmmdir));
+		while (my $file = $dir->read()) {
+		  push(@hmmfiles, File::Spec->catfile($hmmdir, $file)) if ($file =~ /\.hmm$/);
+		}
+		$dir->close();
+		return(sort(@hmmfiles));
+	}
+	else {
+		print $stdout "single hmm\n" if $verbose;
+		push(@hmmfiles, $hmmfile);
+		return(@hmmfiles);
+	}
+}
+
+# Sub: translate_est
+# Translate a nucleotide fasta file to protein in all six reading frames
+# Expects: scalar string filename
+# Returns: scalar string filename (protfile)
+sub translate_est {
+  my ($infile) = shift;
+	my $prepared_infile = prepare_file_for_translation($infile);
+  (my $outfile = File::Spec->catfile($outdir, basename($infile))) =~ s/(\.[^.]*$)/_prot$1/;
+  print $stdout "Translating $input_file in all six reading frames...\n" unless $quiet;
+  if (-e $outfile) {
+    print $stdout "$outfile exists, using this one.\n" unless $quiet;
+    return($outfile);
+  }
+  my $translateline = qq($translate_program --geneticcode $genetic_code '$prepared_infile' > '$outfile');
+  system($translateline) and fail_and_exit('Could not translate input file. Is this nucleotide data?');
+  return($outfile);
+}
+
+# Sub: prepare_file_for_translation
+# Removes all trailing spaces from sequence headers, writing the result to a new file
+# Expects: scalar string filename
+# Returns: scalar string output filename
+sub prepare_file_for_translation {
+	my $file = shift;
+  (my $outfile = File::Spec->catfile($outdir, basename($file))) =~ s/(\.[^.]*$)/_prepared$1/;
+	my $fh = Seqload::Fasta->open($file);
+	my $ofh = IO::File->new($outfile, 'w');
+	while (my ($h, $s) = $fh->next_seq()) {
+		$h =~ s/\s*$//;
+		printf $ofh ">%s\n%s\n", $h, $s;
+	}
+	undef $fh;
+	undef $ofh;
+	return $outfile;
+}
+
+# sub: backup_old_output_files
+# input: reference to list of relevant contigs
+sub schedule_for_backup {
+  my $outfile = shift;
+	if (-d $outfile) {	# it's a directory
+		my $dirh = IO::Dir->new($outfile);
+		while (my $file = $dirh->read()) {
+			next if $file =~ /^\./;
+			next if $file =~ /^backup/;
+			schedule_for_backup(File::Spec->catfile($outfile, $file));
+		}
+		$dirh->close();
+	}
+  elsif (-f $outfile) {
+		# yo dawg i heard you like backups so i made a backup of your backups... don't
+		next if $outfile =~ /^backup/;  
+		# ok, this file will be backed up
+    push(@backup, $outfile);
+  }
+	return 1;
+}
+
+# sub: create_tarball
+# writes a compressed tar archive
+# Expects: list of files
+# Returns: scalar string tarfilename
+sub create_tarball {
+	my @files = @_;
+	my $tarfile = File::Spec->catfile($outdir, 'backup-' . $timestring . '.tar.bz2');
+	my $tarball = Archive::Tar->new();
+	$tarball->setcwd($outdir);
+	$tarball->add_files(@files);
+	$tarball->write($tarfile, COMPRESS_BZIP) or print $stderr "Fatal: Could not create tarball in '$tarfile': $!\n" and exit(1);
+	return $tarfile;
+}
+
+# Sub: preparedb
+# Generate a clean database, deleting all existing tables and starting from scratch
+# Returns: True on success
+sub preparedb {
+	if ($use_mysql) {
+		return Wrapper::Mysql::preparedb();
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::preparedb();
+	}
+}
+
+
+# Sub: clear_db
+# clears the database of previous results from the same species 
+sub clear_db {
+
+	my $species_name = shift;
+	return unless $species_name;
+
+	# get the species id from the database
+	my $specid = get_taxid_for_species($species_name)
+		or print $stderr "Warning: Could  not get species ID from database: $DBI::errstr\n";
+	return unless $specid;
+
+	# clear previous results from the same species
+	return clear_db($specid);
+}
+
+# Sub: insert_results_into_table
+#	inserts the results of either hmmsearch or blastp into a database
+# Expects: scalar string TABLENAME, reference to array HITS, scalar string BLASTDATABASE (optional)
+# Returns: Number of inserted results (hitcount)
+sub insert_results_into_table {
+	my $table = shift;
+	my $hits  = shift;
+	my $hmmsearch_id = undef;
+	my $blastdb      = undef;
+	# called with 4 args, we are dealing with a blast result
+	if (scalar @_ == 2) {
+		$blastdb      = shift;
+		$hmmsearch_id = shift;
+	}
+	if (ref $blastdb) { confess 'Usage: insert_results_into_table($table, $columns_ref, $blastdb)' }
+	my $hitcount;
+
+
+	# this is a BLASTP/SWIPE result
+	if ($blastdb) {
+		if ($use_mysql) {
+			return Wrapper::Mysql::insert_results_into_blast_table($hits, $species_id, $hmmsearch_id);
+		}
+		elsif ($use_sqlite) {
+			return Wrapper::Sqlite::insert_results_into_blast_table($hits, $species_id, $hmmsearch_id);
+		}
+	}
+
+	# this is a HMMsearch result
+	else {
+		# filter results to those above score and below e-value thresholds
+		$hits = [ grep { $_->{'score'}  >= $hmmsearch_score_threshold  } @$hits ];
+		$hits = [ grep { $_->{'evalue'} <= $hmmsearch_evalue_threshold } @$hits ];
+
+		# only insert as many results as needed
+		my $c = 0;
+		my $actual_hits = [ ];
+		while ($c++ < $max_blast_searches and @$hits) {
+			push @$actual_hits, shift @$hits;
+		}
+
+		# done, hand over to insertion
+		if ($use_mysql) {
+			return Wrapper::Mysql::insert_results_into_hmmsearch_table($actual_hits, $species_id);
+		}
+		elsif ($use_sqlite) {
+			return Wrapper::Sqlite::insert_results_into_hmmsearch_table($actual_hits, $species_id);
+		}
+	}
+}
+
+# Sub: file_is_empty
+# tests whether a file is empty (i.e., contains nothing or only empty lines)
+# Expects: scalar string path to file
+# Returns: True if file is empty, false otherwise
+sub file_is_empty {
+	my $file = shift;
+	my $fh = IO::File->new($file);
+	while (<$fh>) {
+		/^\s*$/ ? next : return 0;	# skip empty lines
+	}
+	return 1;
+}
+
+# Sub: make_hmms
+# Generate HMMs for a given core-ortholog set
+# Arguments: scalar string ortholog set name
+# Returns: True if successful
+sub make_hmms {
+	my $set = shift;
+	my $set_id = get_set_id($set)
+		or print $stderr "Warning: Could not get set ID for set '$set' from database: $DBI::errstr\n";
+	my $hmmsuffix = '.hmm';
+	# does the alignment dir exist?
+	if (!-e $alndir) {
+		Orthograph::Functions::makedir($alndir) or print $stderr "Fatal: Failed to create directory $alndir\n" and exit(1);
+	}
+	# does the HMM dir exist?
+	if (!-e $hmmdir) {
+		Orthograph::Functions::makedir($hmmdir) or print $stderr "Fatal: Failed to create directory $hmmdir\n" and exit(1);
+	}
+	print $stdout "Generating ortholog set $set...  This may take a long time, please be patient.\n" unless $quiet;
+
+	# get the ortholog set from the database
+	my $data = get_ortholog_groups_for_set($set_id)
+		or print $stderr "Warning: Could not get ortholog groups for set '$set' from database: $DBI::errstr\n";
+
+	my $num_orthoids = scalar(keys(%$data));
+	my $o = 0;
+	foreach my $orthoid (sort { $a cmp $b } keys(%$data)) {
+		Orthograph::Functions::progress_bar($o, $num_orthoids, 25, '-');
+		++$o;
+		my $hmmfile = File::Spec->catfile($hmmdir, $orthoid . $hmmsuffix);
+
+		# does this HMM already exist?
+		# if so, skip to the next
+		if (-e $hmmfile and not file_is_empty($hmmfile)) { next }
+
+		# if it exists, but the file is empty (this happens if you cancel the build
+		# process), rebuild this HMM
+		elsif (-e $hmmfile and file_is_empty($hmmfile)) { print $stderr "Warning: Rebuilding HMM for $orthoid due to empty HMM file\n" }
+
+		# no, create new fasta file and so on
+		my $fafile = File::Spec->catfile($alndir, $orthoid . '.fa');
+		my $fafh = IO::File->new($fafile, 'w');
+		foreach my $id (sort { $a cmp $b } keys(%{$data->{$orthoid}})) {
+			printf($fafh ">%s\n%s\n", $id, $$data{$orthoid}{$id})
+				or die("Fatal: Could not write to file '$fafh': $!\n");
+		}
+		$fafh->close();
+
+		# align
+		my $alnfile = align($fafile, $orthoid)
+			or die("\nFatal: Alignment failed for '$fafh': $! (errcode $?)\n");
+
+		# convert to stockholm
+		my $stockhfile = fasta2stockholm($alnfile, $orthoid)
+			or die("\nFatal: Conversion to Stockholm format failed for '$alnfile': $! (errcode $?)\n");
+
+		# build HMM
+		hmmbuild($stockhfile, $hmmfile)
+			or die("\nFatal: HMM generation failed for '$alnfile': $! (errcode $?)\n");
+	}
+	undef($data);	# free memory... well, it's bound to go out of scope anyway
+	return($hmmdir);
+}
+
+# Sub: align
+# Generate a fasta alignment from a fasta file
+# Arguments: Scalar string filename, scalar string orthoid
+# Returns: Scalar string alignment filename on success, false otherwise
+sub align {
+	my $fafile = shift;
+	my $orthoid = shift;
+	(my $fasuffix = $fafile) =~ /(\.(fa|fas|fasta))/;
+	my $alnsuffix = '.aln';
+	my $errfile = File::Spec->catfile($logdir, 'alignment.err');
+	my $alignment_cmd = qq($alignment_program '$fafile' 2> '$errfile');	# this prints the alignment to STDOUT, must be captured somehow
+	print $stdout "$alignment_cmd\n" if $debug;
+	my $alnf = File::Spec->catfile($alndir, $orthoid . '.aln.fa');
+	my $aln = `$alignment_cmd`
+		or print $stderr "\nFatal: Alignment for $orthoid failed: errcode $?. Look into alignment.err in your log directory for more information.\n" and exit(1);
+	my $alnfh = IO::File->new($alnf, 'w')
+		or print $stderr "\nFatal: Could not open alignment file '$alnf' for writing: $!\n" and exit(1);
+	print $alnfh $aln
+		or print $stderr "\nFatal: Could not write alignment to file $alnf: $!\n" and exit(1);
+	$alnfh->close();
+	return $alnf;
+}
+
+# Sub: fasta2stockholm
+# Converts a fasta file into a stockholm file. Warning: Does no validity checking whatsoever!
+# Arguments: Scalar string filename
+# Returns: Scalar string filename
+sub fasta2stockholm {
+	my $fafile = shift;
+	my $orthoid = shift;
+	my $fh = Seqload::Fasta->open($fafile);
+	my $stockhf = File::Spec->catfile($alndir, $orthoid . '.stockh');
+	my $stockhfh = IO::File->new($stockhf, 'w')
+		or print $stderr "\nFatal: Could not open file '$stockhf' for writing: $!\n" and exit(1);
+	print $stockhfh "# STOCKHOLM 1.0\n";
+	while (my ($h, $s) = $fh->next_seq()) {
+		printf($stockhfh "%-50s %s\n", $h, $s)
+			or print $stderr "\nFatal: Could not write Stockholm file $stockhfh: $!" and exit(1);
+	}
+	print $stockhfh "//";
+	close($stockhfh);
+	return $stockhf;
+}
+
+# Sub: hmmbuild
+# Generates a hidden Markov model (HMM) file from an alignment (fasta) file.
+# Arguments: Scalar string filename, scalar string hmmfilename
+# Returns: True on success, false otherwise
+sub hmmbuild {
+	my $alnfile = shift;
+	my $hmmfile = shift;
+	my $alnsuffix = '.aln';
+	my $hmmsuffix = '.hmm';
+	my $threads = 1;
+	my $hmmname = basename($hmmfile, $hmmsuffix);
+	if ($num_threads > 1) { $threads = "--cpu $num_threads" } else { $threads = '' }
+	my $hmmbuild_cmd = qq($hmmbuild_program $threads -n '$hmmname' '$hmmfile' '$alnfile' > /dev/null);
+	print $stdout "$hmmbuild_cmd\n" if $debug;
+	system($hmmbuild_cmd) and
+		return 0;
+	return $hmmfile;
+}
+
+# Sub: make_blastdb 
+# Create a BLAST database from a file. Pulls everything from the database.
+# Arguments: Scalar string ortholog set name
+# Returns: Scalar string path_to_blastdbfile
+sub make_blastdb {
+	my $setid = shift or croak('Usage: make_blastdb(SETID)');
+
+	# build the paths for input and output
+	my $dbfile = File::Spec->catfile($blastdir, $orthoset);
+
+	# check whether the db needs rebuilding
+	unless (blastdb_needs_rebuilding($dbfile, $setid)) {
+		print $stdout "BLAST DB for set $orthoset exists in '$dbfile'.\n" unless $quiet;
+		return $dbfile;
+	}
+
+	# database not extant, we have to create it
+	print $stdout "BLAST DB for set $orthoset needs building, creating in $dbfile...\n" unless $quiet;
+	my $infh = File::Temp->new( UNLINK => 1, DIR => $tmpdir );
+	# don't delete this file if debugging
+	$infh->unlink_on_destroy(0) if $debug;
+
+	# get the sequences from the database
+	my $sequences = get_aaseqs_for_set($setid)
+		or print $stderr "Warning: Could not get sequences for set '$orthoset' from database: $DBI::errstr\n";
+
+	# write to output file
+	while (my ($h, $s) = each %$sequences) {
+		# warn if the sequence has invalid characters
+		if ($s =~ /([^ACDEFGHIKLMNPQRSTVWXYZUX]+)/) {
+			print $stderr "Warning: Invalid characters '$1' in protein sequence $h. Let's hope BLAST will not choke on this one.\n";
+		}
+		# but write out anyway
+		printf($infh ">%s\n%s\n", $h, $s)
+			or print $stderr "Fatal: Could not write to makeblastdb input file $infh $!\n" and exit(1);
+	}
+	undef $sequences;
+	$infh->close();
+	
+
+	# make blast database
+	my $makeblastdbcmd = qq($makeblastdb_program -in '$infh' -out '$dbfile' -input_type fasta -dbtype prot -title '$orthoset' -parse_seqids);
+	if ($debug) {
+		print $stdout "$makeblastdbcmd\n";
+	}
+	else {
+		$makeblastdbcmd .= qq( > /dev/null );
+	}
+	system($makeblastdbcmd) and print $stderr "Fatal: BLAST database generation failed: $! (errcode $?)\n" and exit(1);
+	#
+	# make sure the tempfile is deleted
+	undef $infh;
+
+	# set the db to no-rebuild
+	set_blastdb_to_rebuild($setid, 0);
+
+	print $stdout "Using BLAST database $dbfile\n";
+
+	return $dbfile;
+}
+
+sub blastdb_needs_rebuilding {
+	my $db = shift;
+	my $setid = shift;
+	my $rebuild = 0;
+	if ($use_mysql) {
+		$rebuild = Wrapper::Mysql::blastdb_needs_rebuilding($setid);
+	}
+	elsif ($use_sqlite) {
+		$rebuild = Wrapper::Sqlite::blastdb_needs_rebuilding($setid);
+	}
+	# rebuild necessary
+	if ($rebuild)                                    { return 1 }
+	# doesn't exist, rebuild necessary
+	elsif (not -e File::Spec->catfile($db . '.psq')) { return 1 }
+	# exist and rebuild not necessary
+	else                                             { return 0 }
+}
+
+sub set_blastdb_to_rebuild {
+	if ($use_mysql) {
+		return Wrapper::Mysql::set_blastdb_to_rebuild(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::set_blastdb_to_rebuild(@_);
+	}
+}
+
+
+# Sub: load_data_infile
+# LOAD DATA LOCAL INFILE into a table
+# Arguments: scalar string filename, scalar string tablename, reference to list of columns
+# Returns: scalar int number of loaded rows
+sub load_data_infile {
+	my $infile = shift(@_);
+	my $table_ests = shift(@_) or croak 'Usage: load_data_infile($infile, $db_table_ests, $type [, $columns_reference])';
+	my $type = shift(@_) or croak 'Usage: load_data_infile($infile, $db_table_ests, $type [, $columns_reference])';
+	my $columns;
+	my $list;
+	my $bp = 0;
+	if (scalar(@_)) {
+		$columns = shift(@_);
+		unless (ref($columns)) {
+			croak 'Usage: load_data_infile($infile, $db_table_ests [, $columns_reference])';
+		}
+		$list = join(',', @$columns);
+	}
+
+	# Create temporary csv file for high-speed reading into database
+	my $tmpfh = File::Temp->new(
+		'UNLINK' => 1,
+		'DIR' => File::Spec->catdir($tmpdir),
+		'TEMPLATE' => 'XXXX'
+	);
+	my $infh = Seqload::Fasta->open($infile);
+	print $stdout "Writing data to temporary file...\n" if $verbose;
+	while (my ($h, $s) = $infh->next_seq()) {
+		$h =~ s/,/ /g;	# remove all commas from the header, they confuse the csv parser
+		$s =~ s/-//g;	# remove all gaps from the sequence
+		if ($s =~ /([^ACDEFGHIKLMNPQRSTVWYX*])/i) {
+			# change all Us to X if requested
+			if ($u_subst) {
+				$s =~ s/U/$u_subst/gi and print $stderr "Warning: Selenocysteine character ('U') replaced with '$u_subst' in sequence $h.\n";
+			}
+			else {
+				print $stderr "Warning: Sequence $h contains nonstandard amino acid symbol '$1'! Make sure your alignment program tolerates this.\n";
+			}
+		}
+		printf($tmpfh "%s,%d,%d,%d,%s,%s\n", 
+			# good idea or not?
+			# good idea
+			Digest::SHA->sha256_hex($s),
+			$species_id,
+			$type,
+			$timestamp_start,
+			$h,
+			$s,
+		);
+		$bp += length $s;
+	}
+	$tmpfh->close();
+	# no need to close the infh since we're already through it, it gets closed automagically
+
+	print $stdout "Loading data into database...\n" if $verbose;
+	load_ests_from_file($tmpfh, $list, $species_id) or print $stderr "Fatal: Failed to load data into database\n" and exit(1);
+	#
+	# make sure the tempfile is deleted
+	undef $tmpfh;
+
+	return 1;
+}
+
+sub load_ests_from_file {
+	if ($use_mysql) {
+		return Wrapper::Mysql::load_ests_from_file(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::load_ests_from_file(@_);
+	}
+}
+
+# Sub: get_transcripts 
+# Get transcript sequences from the database, using their ID as header
+# Arguments: None
+# Returns: Filehandle
+sub get_transcripts {
+	my $species_id = shift;
+	my $type = shift;
+	my $tmpfh = File::Temp->new(
+		'UNLINK'   => 1,
+		'DIR'      => File::Spec->catdir($tmpdir),
+		'TEMPLATE' => 'XXXX'
+	);
+	my $nseqs = 0;
+	my $data = get_transcripts_for_species($species_id, $type)
+		or print $stderr "Warning: Could not get transcript sequences from database: $DBI::errstr\n";
+	while (my $row = shift @$data) {
+		printf($tmpfh ">%s\n%s\n", $$row[0], $$row[1])
+			or print $stderr "Fatal: Could not write to file $tmpfh: $!\n" and exit(1);
+		++$nseqs;
+	}
+	print $stdout "Wrote $nseqs translated sequences to $tmpfh\n" unless $quiet;
+	$tmpfh->close();
+	return $tmpfh;
+}
+
+sub get_transcripts_for_species {
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_transcripts_for_species(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_transcripts_for_species(@_);
+	}
+}
+
+# Sub: get_orthologs
+# Get orthologous sequences from the database, the final result handler
+# Arguments: ortholog id
+# Returns: filename
+sub get_orthologs {
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_orthologs(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_orthologs(@_);
+	}
+}
+
+sub write_sequence_to_tempfile {
+	my $result = shift @_;
+	my $hmmfilename = shift @_;
+	# setup a temporary file to hold the sequence to be blasted
+	my $tmpfile = File::Temp->new(
+		'UNLINK'   => 1, 
+		'DIR'      => File::Spec->catdir($tmpdir), 
+		'TEMPLATE' => basename($hmmfilename) . '-XXXX'
+	);
+	# don't delete this file if debugging
+	$tmpfile->unlink_on_destroy(0) if $debug;
+	# get sequence length
+	my ($start, $end) = ($result->[2] - 1, $result->[3] - 1);
+	my $length = $end - $start;
+	# write fasta header and sequence to the tempfile
+	printf($tmpfile ">%s\n%s\n", $result->[0], substr($result->[1], $start, $length));
+	printf($stdout "Wrote sequence (from %d to %d) to tmpfile %s\n", $start, $end, $tmpfile) if $debug;
+
+	$tmpfile->close();
+	return $tmpfile;
+}
+
+sub generate_blast_output_filename {
+	my $hmmname = shift @_;
+	my $hmmresult = shift @_;
+	my ($start, $end) = ($hmmresult->[2] - 1, $hmmresult->[3] - 1);
+	my $filename = sprintf "%s-%s-[%d-%d]-%s.%s", $hmmname, $hmmresult->[0], $start, $end, basename($blastdb), $rev_search_algorithm;
+	return File::Spec->catfile($rev_search_outdir, $filename);
+}
+
+sub get_hmmresults {
+	my $hit = shift;
+	my $species_id = shift;
+	print $stdout "Getting list of HMMsearch results...\n" if $debug;
+	if ($use_mysql) {
+		my @r = @{ Wrapper::Mysql::get_hmmresults($hit, $species_id) };
+		if (@r) { return @r }
+		else    { print $stderr "Warning: Failed to get HMMsearch results from database: $DBI::errstr\n" }
+	}
+	elsif ($use_sqlite) {
+		my @r = @{ Wrapper::Sqlite::get_hmmresults($hit, $species_id) };
+		if (@r) { return @r }
+		else    { print $stderr "Warning: Failed to get HMMsearch results from database: $DBI::errstr\n" }
+	}
+}
+
+sub pass_stderr {
+	if ($use_mysql) {
+		return Wrapper::Mysql::pass_stderr(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::pass_stderr(@_);
+	}
+}
+
+sub pass_stdout {
+	if ($use_mysql) {
+		return Wrapper::Mysql::pass_stdout(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::pass_stdout(@_);
+	}
+}
+
+sub get_number_of_ests_for_specid {
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_number_of_ests_for_specid(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_number_of_ests_for_specid(@_);
+	}
+}
+
+
+sub get_set_id {
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_set_id(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_set_id(@_);
+	}
+}
+
+sub get_taxa_in_set {
+	if ($use_mysql) {
+		Wrapper::Mysql::get_taxa_in_set(@_);
+	}
+	elsif ($use_sqlite) {
+		Wrapper::Sqlite::get_taxa_in_set(@_);
+	}
+}
+
+sub set_exists {
+	if ($use_mysql) {
+		return Wrapper::Mysql::set_exists(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::set_exists(@_);
+	}
+}
+
+sub get_aaseqs_for_set {
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_aaseqs_for_set(@_);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_aaseqs_for_set(@_);
+	}
+}
+
+sub get_taxid_for_species {
+	my $sn = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_taxid_for_species($sn);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_taxid_for_species($sn);
+	}
+}
+
+sub get_ortholog_groups_for_set {
+	my $sid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_ortholog_groups_for_set($sid);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_ortholog_groups_for_set($sid);
+	}
+}
+
+
+sub species_tables_present {
+	my $specid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::species_tables_present($specid);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::species_tables_present($specid);
+	}
+}
+
+sub db_structure_present {
+	if ($use_mysql) {
+		return Wrapper::Mysql::db_structure_present();
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::db_structure_present();
+	}
+}
+
+
+sub fail_and_exit {
+	my $msg = shift @_;
+	print $stderr 'Fatal: ' . $msg . "\n";
+	exit 1;
+}
+
+__END__
+

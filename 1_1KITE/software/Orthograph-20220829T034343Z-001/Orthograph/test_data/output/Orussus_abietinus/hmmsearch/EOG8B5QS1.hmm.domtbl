@@ -1,0 +1,14 @@
+#                                                                                                                        --- full sequence --- -------------- this domain -------------   hmm coord   ali coord   env coord
+# target name                                                    accession   tlen query name           accession   qlen   E-value  score  bias   #  of  c-Evalue  i-Evalue  score  bias  from    to  from    to  from    to  acc description of target
+#                                            ------------------- ---------- ----- -------------------- ---------- ----- --------- ------ ----- --- --- --------- --------- ------ ----- ----- ----- ----- ----- ----- ----- ---- ---------------------
+2bbe498f318247889ff84c94eca38e8203e1bed0058cf2c3435b7ec07fdc8a7d -           1847 EOG8B5QS1            -            929         0 1982.6   0.1   1   1         0         0 1982.4   0.1    11   928    10   917    10   917 1.00 -
+#
+# Program:         hmmsearch
+# Version:         3.2.1 (June 2018)
+# Pipeline mode:   SEARCH
+# Query file:      sets/test_set/hmms/EOG8B5QS1.hmm
+# Target file:     /home/ajbaker6/environment/software/Orthograph/test_data/output/Orussus_abietinus/tmp/xc28
+# Option settings: /public/apps/hmmer/3.2.1/bin/hmmsearch --domtblout /home/ajbaker6/environment/software/Orthograph/test_data/output/Orussus_abietinus/hmmsearch/EOG8B5QS1.hmm.domtbl -T 10 --cpu 1 sets/test_set/hmms/EOG8B5QS1.hmm /home/ajbaker6/environment/software/Orthograph/test_data/output/Orussus_abietinus/tmp/xc28 
+# Current dir:     /home/ajbaker6/environment/software/Orthograph
+# Date:            Thu Nov 11 13:51:28 2021
+# [ok]

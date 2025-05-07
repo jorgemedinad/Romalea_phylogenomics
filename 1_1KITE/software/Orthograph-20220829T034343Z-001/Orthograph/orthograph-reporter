@@ -1,0 +1,1755 @@
+#!/usr/bin/env perl
+#--------------------------------------------------
+# This file is part of Orthograph.
+# Copyright 2014 Malte Petersen <mptrsen@uni-bonn.de>
+# 
+# Orthograph is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+# 
+# Orthograph is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along with
+# Orthograph. If not, see http://www.gnu.org/licenses/.
+#-------------------------------------------------- 
+
+# Pragmas
+use strict;         # make me write clean code
+use warnings;       # cry if something seems odd
+use autodie;        # die automatically on I/O functions
+
+# Core modules
+use Carp;           # carp and croak: warn and die with call stack
+use Data::Dumper;   # great for debugging
+use File::Basename;
+use FindBin;        # locate the dir of this script during compile time
+use Getopt::Long;   # command line options
+use IO::File;       # object-oriented access to files
+use List::Util qw( first min max sum );  # list functions
+use Time::HiRes qw(time);    # high-resolution timer
+
+# Custom modules
+use lib $FindBin::RealBin;             # $RealBin is the directory of the original script
+use Orthograph::Config;                # configuration in global hashref $config
+use Orthograph::Functions;             # functions for all Orthograph tools
+use Orthograph::Version;
+use Wrapper::Exonerate;
+use IO::Tee;
+
+my $program_name = 'Orthograph';
+$0 = $program_name;
+my $version = $Orthograph::Version::version;
+
+my $config = $Orthograph::Config::config;	# copy config variables
+
+#--------------------------------------------------
+# # The user only wants help
+#-------------------------------------------------- 
+if ($config->{'help'}) {
+	Orthograph::Functions::print_usage($config) and exit;
+}
+
+#--------------------------------------------------
+# # Database settings
+#-------------------------------------------------- 
+# which database backend do we use?
+my $database_backend = $config->{'database-backend'};
+my $use_mysql        = $database_backend =~ /mysql/i  ? 1 : 0;
+my $use_sqlite       = $database_backend =~ /sqlite/i ? 1 : 0;
+my $database         = undef;
+# load the database modules at runtime, depending on the backend setting
+if ($use_mysql)      {
+	require Wrapper::Mysql;
+	$database = $config->{'mysql-database'};
+}
+elsif ($use_sqlite) {
+	require Wrapper::Sqlite;
+	$database = $config->{'sqlite-database'};
+}
+
+# MySQL settings
+my $mysql_table_blast          = $config->{'mysql_table_blast'};
+my $mysql_table_blastdbs       = $config->{'mysql_table_blastdbs'};
+my $mysql_table_ests           = $config->{'mysql_table_ests'};
+my $mysql_table_hmmsearch      = $config->{'mysql_table_hmmsearch'};
+my $mysql_table_set_details    = $config->{'mysql_table_set_details'};
+my $mysql_table_aaseqs         = $config->{'aaseqs'};
+my $mysql_table_seqpairs       = $config->{'sequence-pairs'};
+my $mysql_table_taxa           = $config->{'taxa'};
+my $mysql_table_orthologs      = $config->{'orthologs'};
+
+# directory and output settings
+my $outdir                     = $config->{'output-directory'};
+my $aaoutdir                   = File::Spec->catdir($outdir, $config->{'aaoutdir'});
+my $ntoutdir                   = File::Spec->catdir($outdir, $config->{'ntoutdir'});
+my $logdir                     = File::Spec->catdir($outdir, 'log');
+my $logfile                    = $config->{'logfile'};
+my $clear_old_output_files     = $config->{'clear-files'};
+my $debug                      = $config->{'debug'};
+my $quiet                      = $config->{'quiet'};
+my $concat_sep                 = $config->{'concatenation-header-separator'};
+my $sep                        = $config->{'header-separator'};
+my $verbose                    = $config->{'verbose'};
+
+# settings for this specific analysis
+my $blast_evalue_threshold     = $config->{'blast-evalue-threshold'};
+my $brh_only                   = $config->{'brh-only'};
+my $exonerate_alignment_model  = $config->{'exonerate-alignment-model'};
+my $exonerate_program          = $config->{'exonerate-program'};
+my $extend_orf                 = $config->{'extend-orf'};
+my $extended_orf_overlap_minimum = $config->{'extended-orf-overlap-minimum'};
+my $fill_with_x                = $config->{'fill-with-x'};
+my $frameshift_correction      = $config->{'frameshift-correction'};
+my $genetic_code               = $config->{'genetic-code'};
+my $hmmsearch_evalue_threshold = $config->{'hmmsearch-evalue-threshold'};
+my $hmmsearch_score_threshold  = $config->{'hmmsearch-score-threshold'};
+my $max_reciprocal_mismatches  = $config->{'max-reciprocal-mismatches'};
+my $minimum_transcript_length  = $config->{'minimum-transcript-length'};
+my $orf_overlap_minimum        = $config->{'orf-overlap-minimum'};
+my $orthoid_list_file          = $config->{'cog-list-file'};
+my $reference_taxa             = $config->{'reference-taxa'};
+my $setname                    = $config->{'ortholog-set'};
+my $soft_threshold             = $config->{'soft-threshold'};
+my $species_name               = $config->{'species-name'};
+my $strict_search              = $config->{'strict-search'};
+my $translate_program          = $config->{'translate-program'};
+
+# make a nice time string
+my @lt                   = localtime time;
+my $timestring           = sprintf "%04d-%02d-%02d_%02d:%02d", $lt[5] + 1900, $lt[4] + 1, $lt[3], $lt[2], $lt[1];
+
+# this message will be printed later when we have a log file handle
+my $message = "$program_name: Orthology prediction using a Graph-based,\n" .
+	"Reciprocal Approach with Profile Hidden Markov models\n" .
+	"Copyright 2015 Malte Petersen <mptrsen\@uni-bonn.de>\n" .
+	"Version $version\n\n";
+
+# report configuration
+if ($verbose) {
+	$message .= "Using the following configuration settings:\n";
+	foreach (sort keys %$config) {
+		$message .= sprintf "%s = %s\n", $_, $config->{$_} if defined $config->{$_};
+	}
+	$message .= "\n";
+}
+
+# set the logfile unless specified
+unless ($logfile) {
+	$logfile = File::Spec->catfile($logdir, 'orthograph-reporter-' . $timestring . '.log');
+}
+else {
+	$logdir = dirname($logfile);
+}
+
+# create the log dir if it doesn't exist
+if (-d $logdir) {
+	$message .= "Using log dir '$logdir'.\n" unless $quiet;
+}
+else {
+	$message .= "Log dir '$logdir' does not exist, creating...\n" unless $quiet;
+	Orthograph::Functions::makedir($logdir) or die "Fatal: Failed to create log directory $logdir\n";
+}
+
+# clear aa and nt output directories unless the user doesn't want to
+if ($clear_old_output_files) {
+	Orthograph::Functions::cleardir($aaoutdir);
+	Orthograph::Functions::cleardir($ntoutdir);
+}
+
+# open log and set table output file
+my $logfh = IO::File->new($logfile, 'w')
+	or die "Fatal: Could not open log file '$logfile'\: $!\n";
+$logfh->autoflush();
+my $tablefile = File::Spec->catfile($outdir, 'summary.txt');
+my $best_reciprocal_hits_file = File::Spec->catfile($outdir, 'best-reciprocal-hits.txt');
+my $non_overlapping_best_reciprocal_hits_file = File::Spec->catfile($outdir, 'non-overlapping-best-reciprocal-hits.txt');
+
+# setup IO::Tee
+my $stdout = IO::Tee->new(
+	\*STDOUT,
+	$logfh,
+);
+my $stderr = IO::Tee->new(
+	\*STDERR,
+	$logfh,
+);
+# print collected messages to logfile
+print $stdout $message;
+undef $message;
+
+# test whether programs exist where specified
+Orthograph::Functions::program_exists($exonerate_program) or print $stderr "Fatal: Exonerate not executable at '$exonerate_program'. Verify path and/or permissions\n" and exit(1);
+Orthograph::Functions::program_exists($translate_program) or print $stderr "Fatal: Fastatranslate not executable at '$translate_program'. Verify path and/or permissions\n" and exit(1);
+
+# read the list of orthoids from file
+my $list_of_wanted_orthoids;
+if ($orthoid_list_file) {
+	$list_of_wanted_orthoids = Orthograph::Functions::file2arrayref($orthoid_list_file);
+}
+
+# also be verbose if debugging
+if ($debug) { $verbose = 1; Wrapper::Exonerate->debug(1) }
+
+# More variables
+my $bin_size             = 500;
+my $blastresults         = undef;
+my $count                = 0;
+my $data_by_orthoid      = { };
+my $out                  = { };
+my $data_by_transcript   = { };
+my $data_by_evalue       = { };
+my $hitcount             = 0;
+my $hmmresults           = undef;
+my $insert_n             = 1;
+my $n_complete_orthoids  = 0;
+my $table                = [ ];
+my @reftaxa              = ( );
+my $species_id           = 0;
+my $set_id               = 0;
+my $mismatches           = 0;
+my $max_mismatches       = $soft_threshold;
+my $results              = undef;
+my ($t0, $t1)            = 0;
+my $stats                = { };
+my $starttime            = scalar time;
+my $endtime              = 0;
+my $totaltime            = 0;
+
+# get exonerate and fastatranslate path from config file
+Wrapper::Exonerate->searchprog($exonerate_program);
+Wrapper::Exonerate->translateprog($translate_program);
+Wrapper::Exonerate->outdir($logdir);
+Wrapper::Exonerate->genetic_code($genetic_code);
+Wrapper::Exonerate->alignment_model($exonerate_alignment_model);
+
+# get the species id from the database
+$species_id = get_taxid_for_species($species_name);
+unless ($species_id) {
+	print $stderr "Fatal: No such species in database: '$species_name'\n";
+	exit(1);
+}
+
+# get real table names
+($mysql_table_ests, $mysql_table_hmmsearch, $mysql_table_blast) = get_real_table_names($species_id);
+
+# get the set id from the database
+$set_id = get_set_id($setname);
+unless ($set_id) {
+	print $stderr "Fatal: No such set in database: '$setname'\n";
+	exit(1);
+}
+
+# Create the list of reference taxa
+# This can be set in the config file, otherwise get all taxa in the set
+if ($reference_taxa) {
+	$reference_taxa =~ s/\s*,\s*/,/g;
+	@reftaxa = split(/,/, $reference_taxa);
+}
+else { @reftaxa = get_taxa_in_set($set_id) }
+
+# get a orthoid => list_of_aaseq_ids relationship from the db
+my $aaseqs_in_orthoid = get_orthologs_for_set_hashref($set_id);
+
+# get list of hmmsearch alignment scores
+my $scores = get_scores_list($species_id, $set_id, $hmmsearch_score_threshold);
+my $num_scores = scalar @$scores;
+
+# generate a table
+my $transcripts_mapped_to = { };
+
+# this will hold all transcripts that were found so we can check for redundancy
+my $transcript_list = [ ];
+
+# accumulate errors (due to non-reciprocal hits) for COGs
+my $non_reciprocal_hits_for = { };
+
+# open a text file to hold all best reciprocal relationships, irrespectively of whether they overlap or not
+my $brh_fh = IO::File->new($best_reciprocal_hits_file, 'w')
+	or print $stderr "Fatal: Could not open output file $best_reciprocal_hits_file\: $!\n" and exit(1);
+
+# open a text file to hold all best reciprocal relationships, irrespectively of whether they overlap or not
+my $non_overlapping_brh_fh = IO::File->new($non_overlapping_best_reciprocal_hits_file, 'w')
+	or print $stderr "Fatal: Could not open output file $non_overlapping_best_reciprocal_hits_file\: $!\n" and exit(1);
+
+# okay let's do the loop come on baby let's do the loop
+my $c = 0;
+SCORE:
+foreach my $score (@$scores) {
+
+	$c++;
+	print $stdout "Fetching next batch of results for HMM alignment score $score...\n" if $verbose;
+	$t0 = scalar time;
+	$hmmresults = get_hmmresults_for_single_score($set_id, $score);
+	$t1 = scalar time;
+	# skip empty results
+	unless (@$hmmresults) { next SCORE }
+
+	printf $stdout "Fetched %6d rows for HMM alignment score %7.1f in %.1f seconds (%.1f %%)\n",
+		scalar @$hmmresults,
+		$score,
+		$t1 - $t0,
+		$c / $num_scores * 100
+			unless $quiet;
+
+	RESULT:
+	foreach my $result (@$hmmresults) {
+		my $orthoid = $result->{'orthoid'};
+		# skip this result if it concerns a ortholog group that we didn't want
+		if ($list_of_wanted_orthoids) {
+			next unless grep { $_ eq $orthoid } @$list_of_wanted_orthoids;
+		}
+		# also skip this result if the ortholog group has had too many non-reciprocal hits before
+		if ($non_reciprocal_hits_for->{$orthoid} and $non_reciprocal_hits_for->{$orthoid} > $max_reciprocal_mismatches) {
+			print $stdout "Too many non-reciprocal hits for ortholog group '$orthoid', skipping this match\n"
+				unless $quiet;
+			next RESULT;
+		}
+
+		print $stdout "Checking $orthoid for ortholog hits...\n" if $verbose;
+
+		printf $stdout "Fetching BLAST results for '%s' (HMMsearch id %d, alignment score %.1f)...\n",
+			$result->{'header'},
+			$result->{'hmmsearch_id'},
+			$score,
+				if $verbose;
+		$blastresults = get_blastresults_for_hmmsearch_id($set_id, $result->{'hmmsearch_id'});
+
+
+		# so, was this a reciprocal match?
+		my $this_match = is_reciprocal_match($orthoid, $blastresults);
+
+		# if not, skip this one
+		unless (defined $this_match) {
+			# this orthoid has no match
+			print $stdout "No orthology detected for $orthoid.\n"
+				if $verbose;
+			# one more error
+			$non_reciprocal_hits_for->{$orthoid}++;
+			next RESULT;
+		}
+
+		# yeah, reciprocal hit, continue
+		printf $stdout "Orthology detected for %s! Trying to add %s[%d:%d] to %s.\n",
+			$orthoid,
+			$this_match->{'header'},
+			$this_match->{'hmm_start'},
+			$this_match->{'hmm_end'},
+			$orthoid,
+				if $debug;
+
+		# print this to the best reciprocal hits file
+		printf $brh_fh "%s\t%s\t%d\t%d\t%.1f\t%s\n",
+			$orthoid, 
+			$this_match->{'header'},
+			$this_match->{'ali_start'},
+			$this_match->{'ali_end'},
+			$score,
+			$this_match->{'hmm_evalue'},
+		;
+
+		# does this overlap with previous mappings on the same sequence?
+		if (scalar @$transcript_list and region_mapped_before($result, $transcript_list)) {
+			printf $stdout "Hit %s [%d-%d] overlaps with previous mappings on the same sequence, skipping this match\n",
+				$result->{'header'},
+				$result->{'ali_start'},
+				$result->{'ali_end'},
+					unless $quiet;
+			next RESULT;
+		}
+
+		# no, print this to the non-redundant best reciprocal hits file
+		printf $non_overlapping_brh_fh "%s\t%s\t%d\t%d\t%.1f\t%s\n",
+			$orthoid, 
+			$this_match->{'header'},
+			$this_match->{'ali_start'},
+			$this_match->{'ali_end'},
+			$score,
+			$this_match->{'hmm_evalue'},
+		;
+
+
+		# is this long enough?
+		if (transcript_not_long_enough($this_match)) {
+			next RESULT;
+		}
+
+		# if this orthoid has been hit before, check whether the new candidate
+		# overlaps on hmm (gene) level with previous hits or whether we want any
+		# more candidates at all
+		if (exists $transcripts_mapped_to->{$orthoid}) {
+
+			# sometimes we only need the best one (BRH)
+			if ($brh_only) {
+				next RESULT;
+			}
+
+			if (hmm_overlap($transcripts_mapped_to->{$orthoid}, $this_match)) {
+				# yep, it overlaps, so we can't assign this transcript because better
+				# e-values have precedence. just go to the next one
+				printf $stdout "Overlap with previous hit on hmm level for %s: discarded %s.\n",
+					$orthoid,
+					$this_match->{'header'}
+						if $verbose;
+				next RESULT;
+			}
+
+			# or does it overlap on transcript level?
+			elsif (transcript_overlap($transcripts_mapped_to->{$orthoid}, $this_match)) {
+				printf $stdout "Overlap with previous hit on transcript level for %s: discarded %s.\n",
+					$orthoid,
+					$this_match->{'header'}
+						if $verbose;
+				next RESULT;
+			}
+
+			else {
+				# does not overlap, add to list of transcripts for this ortholog group
+				push @{ $transcripts_mapped_to->{$orthoid} }, $this_match;
+				printf $stdout ">> No overlap with previous hits: added '%s' [%d:%d] to %s (hmm %d-%d).\n",
+					$this_match->{'header'},
+					$this_match->{'ali_start'},
+					$this_match->{'ali_end'},
+					$orthoid,
+					$this_match->{'hmm_start'},
+					$this_match->{'hmm_end'},
+						unless $quiet;
+				# this transcript can't be found again
+				push @$transcript_list, $this_match;
+				# ok, next one
+				next RESULT;
+			}
+
+		}
+
+		else {
+
+			# this has not been hit before, just assign
+			printf $stdout ">> Assigned '%s' [%d:%d] to %s (hmm %d-%d).\n",
+				$this_match->{'header'},
+				$this_match->{'ali_start'},
+				$this_match->{'ali_end'},
+				$orthoid,
+				$this_match->{'hmm_start'},
+				$this_match->{'hmm_end'},
+					unless $quiet;
+			push @{ $transcripts_mapped_to->{$orthoid} }, $this_match;
+
+			# this transcript can't be found again
+			push @$transcript_list, $this_match;
+
+			# reset 
+			undef $this_match;
+		}
+
+	# END RESULT
+	} 
+
+# END SCORE
+}
+
+# close the table files, we no longer need them
+undef $brh_fh;
+undef $non_overlapping_brh_fh;
+
+print $stdout "\n";
+print $stdout "####################################\n";
+print $stdout "## Finished fetching from the database.\n";
+print $stdout "## Starting output.\n";
+print $stdout "####################################\n";
+
+# a tablefile
+my $tfh = IO::File->new($tablefile, 'w')
+	or print $stderr "Fatal: Could not open table file $tablefile\: $!\n" and exit(1);
+
+my $num_n = 0;
+my $num_orthologs = scalar keys %$transcripts_mapped_to;
+my $l_counter = length $num_orthologs;
+my $counter = 0;
+
+# walk the orthologs, concatenate in order if multiple
+ORTHOID:
+foreach my $orthoid (sort {$a cmp $b} keys %$transcripts_mapped_to) {
+	# get the transcripts and sort by descending hmm alignment length
+	my $list_of_hits = $transcripts_mapped_to->{$orthoid};
+	$list_of_hits = [ sort { $b->{'ali_end'} - $b->{'ali_start'} <=> $a->{'ali_end'} - $a->{'ali_start'} } @$list_of_hits ];
+	my ($hdr, $seq, $cdnahdr, $cdnaseq, $reftaxon, $reftaxon_score);
+	$hitcount            = 0;
+	my $firsttime        = 1;
+	my $i                = 0;
+	my $output_sequences = [ ];
+	my $transcripts_skipped = 0;
+
+	++$counter;
+	printf $stdout "## Finalizing %s... (%${l_counter}d of %${l_counter}d)\n", $orthoid, $counter, $num_orthologs;
+	# each reciprocal hit
+	HIT:
+	while (my $hit = shift @$list_of_hits) {
+		++$hitcount;
+		++$i;
+
+		# get the sequences from the database
+		my $proteome_sequence;
+		($proteome_sequence, $hit->{'reftaxon'}) = get_reference_sequence($hit->{'blast_hit'});
+		my ($est_header, $est_sequence_complete) = get_nucleotide_transcript_for($hit->{'header'});
+
+		# crop the est sequence to hmm alignment region
+		my $est_sequence_hmm_region = crop_to_hmm_alignment($est_sequence_complete, $est_header, $hit);
+
+		# if you don't want me to correct for frameshift errors or extend the orf...
+		unless ($frameshift_correction) {
+			( $hit->{'orf_aa_sequence'},
+				$hit->{'orf_cdna_sequence'},
+				$hit->{'orf_cdna_start'},
+				$hit->{'orf_cdna_end'},
+				$hit->{'orf_cdna_start_on_transcript'},
+				$hit->{'orf_cdna_end_on_transcript'},
+				$hit->{'orf_aa_start'},
+				$hit->{'orf_aa_end'},
+				$hit->{'orf_aa_start_on_transcript'},
+				$hit->{'orf_aa_end_on_transcript'},
+			) = hmm_to_orf($hit, $est_sequence_hmm_region, $proteome_sequence);
+			# this can be added to the output sequences
+			push @$output_sequences, $hit;
+			next HIT;
+		}
+		else {
+			# exonerate the orf (also produce corresponding nucleotide sequence)
+			( $hit->{'orf_aa_sequence'},
+				$hit->{'orf_cdna_sequence'},
+				$hit->{'orf_cdna_start'},
+				$hit->{'orf_cdna_end'},
+				$hit->{'orf_aa_start'},
+				$hit->{'orf_aa_end'} ) = get_orf($proteome_sequence, $est_sequence_hmm_region);
+
+			# exonerate didn't get an alignment
+			unless ($hit->{'orf_cdna_sequence'}) {
+				if ($verbose) {
+					printf $stdout "Could not get an ORF for '%s'[%d:%d] and reference sequence %d (%s)\n",
+						$est_header,
+						$hit->{'ali_start'},
+						$hit->{'ali_end'},
+						$hit->{'blast_hit'},
+						$hit->{'reftaxon'},
+					;
+					print $stdout "discarding this transcript\n";
+				}
+				++$transcripts_skipped;
+				next HIT;
+			}
+			# exonerate got an alignment
+			else {
+				# calculate orf coordinates with respect to transcript
+				$hit->{'orf_cdna_start_on_transcript'} = $hit->{'orf_cdna_start'} + ( $hit->{'ali_start'} * 3 ) - 3;
+				$hit->{'orf_cdna_end_on_transcript'}   = $hit->{'orf_cdna_end'} + ( $hit->{'ali_start'} * 3 ) - 3;
+				$hit->{'orf_aa_start_on_transcript'}   = ( $hit->{'orf_cdna_start'} + ( $hit->{'ali_start'} * 3 ) - 3 ) / 3;
+				$hit->{'orf_aa_end_on_transcript'}     = ( $hit->{'orf_cdna_end'} + ( $hit->{'ali_start'} * 3 ) - 3 ) / 3;
+				$hit->{'orf_aa_start_on_hmm'}          = $hit->{'hmm_start'} + $hit->{'orf_aa_start_on_transcript'};
+				$hit->{'orf_aa_end_on_hmm'}            = $hit->{'hmm_start'} + $hit->{'orf_aa_end_on_transcript'};
+				printf $stdout "Got an ORF for '%s'[%d-%d aa] (ORF coords %d-%d nt, %d-%d aa, hmm %d-%d aa)\n",
+					$hit->{'header'},
+					$hit->{'ali_start'},
+					$hit->{'ali_end'},
+					$hit->{'orf_cdna_start_on_transcript'},
+					$hit->{'orf_cdna_end_on_transcript'},
+					$hit->{'orf_aa_start_on_transcript'} + 1,
+					$hit->{'orf_aa_end_on_transcript'},
+					$hit->{'orf_aa_start_on_hmm'} + 1,
+					$hit->{'orf_aa_end_on_hmm'},
+						if $verbose;
+				if ($debug > 1) {
+					print $hit->{'orf_cdna_sequence'}, "\n";
+				}
+				# check whether this ORF overlaps with any previous hits
+				if (overlaps_previous_hit($output_sequences, $hit)) {
+					if ($verbose) {
+						print $stdout "Skipping this transcript\n";
+					}
+					++$transcripts_skipped;
+					next HIT;
+				}
+
+
+				if ($extend_orf) {
+					# get the orf a second time, using the full transcript sequence.
+					# this alignment must cover part of the orthologous region.
+					( $hit->{'extended_orf_aa_sequence'},
+					$hit->{'extended_orf_cdna_sequence'},
+					$hit->{'extended_orf_cdna_start'},
+					$hit->{'extended_orf_cdna_end'},
+					$hit->{'extended_orf_aa_start'},
+					$hit->{'extended_orf_aa_end'},
+					$hit->{'extended_orf_aa_start'},
+					$hit->{'extended_orf_aa_end'}) = try_to_extend_orf($hit, $proteome_sequence, $est_sequence_complete);
+					# two criteria are important: 
+					# a) does the extended orf contain the original orf?
+					# b) do at least 50% of the extended orf overlap with the orthologous region?
+					# a)
+					if (extended_orf_contains_original_orf($hit)) {
+						# b) this is too little overlap
+						my $orf_overlap = overlap_by_orf($hit);
+						if ($orf_overlap < $orf_overlap_minimum) {
+							printf $stdout "Extended ORF (%d-%d nt, %d-%d aa) overlaps the HMM alignment region by only %.2f %% (%d-%d, length %d aa), using original ORF\n", 
+								$hit->{'extended_orf_cdna_start'},
+								$hit->{'extended_orf_cdna_end'},
+								$hit->{'extended_orf_aa_start'},
+								$hit->{'extended_orf_aa_end'},
+								$orf_overlap * 100,
+								$hit->{'ali_start'},
+								$hit->{'ali_end'},
+								$hit->{'ali_end'} - $hit->{'ali_start'} + 1,
+									if $verbose;
+							remove_extended_orf($hit);
+						}
+						# the overlap is sufficient, this is ok
+						else {
+							printf $stdout "Extended ORF (%d-%d nt, %d-%d aa) overlaps the HMM alignment region by %.2f %% (%d-%d, %d aa)\n",
+								$hit->{'extended_orf_cdna_start'},
+								$hit->{'extended_orf_cdna_end'},
+								$hit->{'extended_orf_aa_start'},
+								$hit->{'extended_orf_aa_end'},
+								$orf_overlap * 100,
+								$hit->{'ali_start'},
+								$hit->{'ali_end'},
+								$hit->{'ali_end'} - $hit->{'ali_start'} + 1,
+									if $verbose;
+						}
+					}
+					else {
+						printf $stdout "Extended ORF (%d-%d) outside of original ORF, using original ORF\n" if $verbose;
+						remove_extended_orf($hit);
+					}
+
+					# check whether the extended ORF overlaps with any previous hits
+					if (overlaps_previous_hit($output_sequences, $hit)) {
+						printf $stdout "Extended ORF (%d-%d nt, %d-%d aa) overlaps with previous ORF, using original ORF\n",
+							$hit->{'extended_orf_cdna_start'},
+							$hit->{'extended_orf_cdna_end'},
+							$hit->{'extended_orf_aa_start'},
+							$hit->{'extended_orf_aa_end'},
+						;
+						remove_extended_orf($hit);
+					}
+					# assign (new) reference taxon if blast score higher
+					if (not defined $reftaxon) { 
+						$reftaxon       = $hit->{'reftaxon'};
+						$reftaxon_score = $hit->{'blast_score'};
+					}
+					elsif ($hit->{'blast_score'} > $reftaxon_score) {
+						$reftaxon       = $hit->{'reftaxon'};
+						$reftaxon_score = $hit->{'blast_score'};
+					}
+				}
+
+				# ok, this can be added to the output sequences
+				push @$output_sequences, $hit;
+				if ($verbose) {
+					printf $stdout "Added '%s' (%d-%d nt) to %s (hmm %d-%d)\n",
+						$hit->{'header'},
+						$hit->{'extended_orf_cdna_start_on_transcript'} ? $hit->{'extended_orf_cdna_start_on_transcript'} : $hit->{'orf_cdna_start_on_transcript'},
+						$hit->{'extended_orf_cdna_end_on_transcript'} ? $hit->{'extended_orf_cdna_end_on_transcript'} : $hit->{'orf_cdna_end_on_transcript'},
+						$orthoid,
+						$hit->{'hmm_start'},
+						$hit->{'hmm_end'},
+					;
+				}
+			}
+		}
+	}
+
+	# skip the rest since no sequence could be gathered
+	unless (@$output_sequences) {
+		print $stdout "No ORFs found for $orthoid, skipping...\n" unless $quiet;
+		next ORTHOID;
+	}
+
+	# sort sequences and concatenate 
+	$output_sequences = [ sort { $a->{'hmm_start'} <=> $b->{'hmm_start'} } @$output_sequences ];
+	($hdr, $seq, $cdnahdr, $cdnaseq) = concatenate_sequences($output_sequences, $orthoid);
+
+	# get the core ortholog sequences for this group
+	my $core_sequences = get_ortholog_group($set_id, $orthoid);
+	# new fasta file
+	my $fafn = File::Spec->catfile($aaoutdir, $orthoid . '.aa.fa');
+	my $fafh = IO::File->new($fafn, 'w');
+	# print the core orthologs
+	print_core_sequences($orthoid, $core_sequences, $fafh);
+	# print the concatenated sequence
+	printf $fafh ">%s\n%s\n", $hdr, $seq;
+	print $stdout "wrote concatenated sequence $hdr to file $fafn\n" if $debug;
+	undef $fafh;
+
+	# do the same for the nucleotide sequences
+	my $core_sequences_nt = get_ortholog_group_nucleotide($set_id, $orthoid);
+	# new fasta file
+	$fafn = File::Spec->catfile($ntoutdir, $orthoid . '.nt.fa');
+	$fafh = IO::File->new($fafn, 'w');
+	# print the core orthologs
+	print_core_sequences($orthoid, $core_sequences_nt, $fafh);
+	# print the concatenated sequence
+	printf $fafh ">%s\n%s\n", $cdnahdr, $cdnaseq;
+	print $stdout "wrote concatenated sequence $cdnahdr to file $fafn\n" if $debug;
+	undef $fafh;
+
+	# print to report table
+	printf $tfh "%s", $orthoid;
+	foreach my $hit (@$output_sequences) {
+		next unless defined $hit->{'orf_aa_sequence'};
+		printf $tfh "\t%s[%d aa]", $hit->{'header'}, defined $hit->{'extended_orf_aa_sequence'} ? length $hit->{'extended_orf_aa_sequence'} : length $hit->{'orf_aa_sequence'};
+	}
+	print $tfh "\n";
+
+	# one more
+	$n_complete_orthoids++;
+
+	# report
+	printf $stdout "Mapped %d transcripts to %s (discarded %d transcripts)\n",
+		scalar @$output_sequences,
+		$orthoid,
+		$transcripts_skipped
+			unless $quiet;
+}
+undef $tfh;
+
+# yay
+$endtime = scalar time;
+printf $stdout "## Orthograph report for %s completed in %.2f total seconds\n", $species_name, $endtime - $starttime;
+printf $stdout "## Mapped putatively orthologous transcripts to %d clusters\n", $n_complete_orthoids;
+exit;
+
+
+
+#################################################
+# Functions follow
+#################################################
+
+sub extended_orf_contains_original_orf {
+	my $hit = shift @_;
+	if ($hit->{'extended_orf_cdna_start'} > $hit->{'orf_cdna_end_on_transcript'} or $hit->{'extended_orf_cdna_end'} < $hit->{'orf_cdna_start_on_transcript'}) { return undef }
+	else { return 1 }
+ }
+
+
+sub print_core_sequences {
+	my $orthoid = shift;
+	my $core    = shift;
+	my $fafh    = shift;
+
+	foreach (sort { $a->[0] cmp $b->[0] } @$core) {
+		printf $fafh ">%s\n%s\n",
+			format_header(
+				$orthoid,
+				'.',          # reftaxon (not applicable -> .)
+				$$_[0],       # taxon (this reftaxon)
+				format_transcript_header(
+					$$_[1],        # header
+					1,             # start (1)
+					length $$_[2], # end (length)
+					'.',           # rf (not applicable -> .)
+					'.',          # reftaxon (not applicable -> .)
+				),
+			),
+			$$_[2]          # sequence
+		;
+	}
+	return 1;
+}
+
+# format_header
+# formats the header line
+# arguments: 
+#   cog id,
+#   reftaxon name
+#   this taxon name
+#   header
+
+sub format_header {
+	my $orthoid  = shift;
+	my $reftaxon = shift;
+	my $taxon    = shift;
+	my $header   = shift;
+
+	return join $sep,
+		$orthoid,  # cog id
+		$taxon,    # this taxon name
+		$header,   # the rest of the header
+	;
+
+}
+
+sub join_transcript_headers {
+	my $hits = shift;
+	my $type = shift;
+	my $this_hdr = '';
+	my $rf = '';
+	my @hdrs = ( );
+
+	foreach my $hit (@$hits) {
+		next unless defined $hit->{'orf_aa_sequence'};
+		($this_hdr, $rf) = get_rf($hit->{'header'});
+		# amino acid sequences have reading frame info
+		if ($type eq 'aa') {
+			push @hdrs, 
+				format_transcript_header(
+					$this_hdr,
+					defined $hit->{'extended_orf_aa_start_on_transcript'} ? $hit->{'extended_orf_aa_start_on_transcript'} : $hit->{'orf_aa_start_on_transcript'},
+					defined $hit->{'extended_orf_aa_end_on_transcript'} ? $hit->{'extended_orf_aa_end_on_transcript'} : $hit->{'orf_aa_end_on_transcript'},
+					$rf,
+					$hit->{'reftaxon'},
+				);
+		}
+		# nucleotide sequences do not
+		else {
+			push @hdrs, 
+				format_transcript_header(
+					$this_hdr,
+					defined $hit->{'extended_orf_cdna_start_on_transcript'} ? $hit->{'extended_orf_cdna_start_on_transcript'} : $hit->{'orf_cdna_start_on_transcript'},
+					defined $hit->{'extended_orf_cdna_end_on_transcript'} ? $hit->{'extended_orf_cdna_end_on_transcript'} : $hit->{'orf_cdna_end_on_transcript'},
+					'.',
+					$hit->{'reftaxon'},
+				);
+		}
+	}
+	return join $concat_sep, @hdrs;
+}
+
+sub format_transcript_header {
+	my $hdr    = shift;
+	my $start  = shift;
+	my $end    = shift;
+	my $rf     = shift;
+	my $reftax = shift;
+	my $joined_hdr = join $sep,
+		$hdr,
+		sprintf('%d-%d', $start, $end),
+		$rf,
+		$reftax,
+	;
+	return $joined_hdr;
+}
+=head2 binify(BIN_SIZE, VALUE_COUNT)
+
+binifies a value->count hashref, i.e. generates an arrayref of bins (order
+based on the numerical order of the hash keys), each of which contain a hashref
+with the min and max boundary of the bin:
+
+  [
+    {
+      'min' => min(THIS_BIN),
+      'max' => max(THIS_BIN)
+    },
+    { 
+      'min' => min(THIS_BIN),
+      'max' => max(THIS_BIN)
+    }
+  ]
+
+This is useful for constructing database queries using BETWEEN filters, because
+these would take forever on very large datasets.
+
+=cut
+
+sub binify {
+	my $bin_size    = shift;
+	my $value_count = shift;
+	my $bins        = [ ];
+	my $sum         = 0;
+	my @bin         = ( );
+	foreach my $value (sort {$a <=> $b} keys %$value_count) {
+		# if adding this count would not exceed the bin size
+		if ($sum + $value_count->{$value} < $bin_size) {
+			push @bin, $value;
+			$sum += $value_count->{$value};
+		}
+		# this is too large, start a new bin
+		else {
+			# if the bin has content
+			if (scalar @bin) {
+				# put min and max into @$bins
+				push @$bins, { 'min' => min(@bin), 'max' => max(@bin) };
+				# empty this bin
+				@bin = ( );
+				$sum = 0;
+			}
+			# put this count into the bin
+			push @bin, $value;
+			$sum += $value_count->{$value};
+		}
+	}
+	# in case there is only one bin (happens when there are only few results), return that
+	if (scalar @$bins == 0) { push @$bins, { 'min' => min(@bin), 'max' => max(@bin) } }
+	return $bins;
+}
+
+sub is_reciprocal_match {
+	my $orthoid = shift;
+	my $blastresults = shift;
+	my $match = undef;
+
+	# this is for reftaxon counting
+	my $reftaxon_count = { map { $_ => 0 } @reftaxa };
+
+	# set the mismatch counter
+	$mismatches = 0;
+
+	for (my $i = 0; $i < scalar @$blastresults; $i++) {
+
+		my $result = $blastresults->[$i];
+		my $reftaxon = get_reftaxon_name($result->{'blast_hit'});
+
+		# this reciprocal hit occurs in the HMM
+		if ( first { /$result->{'blast_hit'}/ } @{$aaseqs_in_orthoid->{$orthoid}} ) {
+
+			printf $stdout "    reciprocal hit %d (%s) used in %s!\n",
+				$result->{'blast_hit'},
+				$reftaxon,
+				$orthoid
+					if $verbose;
+
+			$match = $result;
+
+			# we hit something, count it
+			if (exists $reftaxon_count->{$reftaxon}) {
+				$reftaxon_count->{$reftaxon} = 1;
+				# in strict mode, check whether we have hit all reftaxa
+				if ($strict_search) {
+					if ($debug) {
+						print $stdout "These taxa have been hit yet: \n";
+						printf $stdout "  %s: %d\n", $_, $reftaxon_count->{$_} foreach keys %$reftaxon_count;
+					}
+					# all reftaxa have been hit,
+					# even under strict conditions this is a reciprocal match
+					if (not grep { $_ == 0 } values %$reftaxon_count) {
+						return $match;
+					}
+				}
+				# one hit is enough if not in strict mode
+				else {
+					return $match;
+				}
+			}
+			else {
+				if ($verbose) {
+					printf $stdout "'%s' not in reference taxon list, skipping\n", $reftaxon;
+				}
+			}
+
+		}
+		#
+		# if this one didn't hit anything, and the next hit has the same score, evaluate the next one.
+		#
+		elsif (defined $blastresults->[$i+1] and $blastresults->[$i+1]->{'blast_score'} == $result->{'blast_score'}) {
+			printf $stdout "    reciprocal hit %d (%s) not used in this HMM, but next one has same score, skipping this hit\n",
+				$result->{'blast_hit'},
+				$reftaxon
+					if $verbose;
+			next;
+		}
+		else {  # not found
+			# cry
+			++$mismatches;
+			printf $stdout "    reciprocal hit %d (%s) not used in this HMM (mismatch #%d) :(\n",
+				$result->{'blast_hit'},
+				$reftaxon,
+				$mismatches
+					if $verbose;
+
+			# no match
+			undef $match;
+
+			# too many mismatches, we don't trust this one anymore
+			if ($mismatches >= $max_mismatches) {
+				print $stdout "    Too many mismatches, we don't trust this one anymore.\n" if $verbose;
+				return undef;
+			}
+		}
+	}
+
+	return undef;
+}
+
+sub hmm_overlap {
+	my $already_assigned = shift;
+	my $candidate = shift;
+	# test whether the candidate overlaps on hmm level, return 1 or 0
+	foreach my $assigned_transcript (@$already_assigned) {
+		# the hmm coords do not overlap
+		if ($$candidate{'hmm_end'} <= $$assigned_transcript{'hmm_start'} or $$candidate{'hmm_start'} >= $$assigned_transcript{'hmm_end'}) {
+			print_no_overlap($candidate, $assigned_transcript, 'hmm')
+				if $verbose;
+		}
+		else {
+			print_overlap($candidate, $assigned_transcript, 'hmm')
+				if $verbose;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+sub transcript_overlap {
+	my $already_assigned = shift;
+	my $candidate = shift;
+	# test whether the candidate overlaps on transcript level, return 1 or 0
+	# but only if it is on the same transcript
+	foreach my $assigned_transcript (@$already_assigned) {
+		# these are different transcripts, we don't care if coordinates overlap
+		if ($$candidate{'hmmhit'} ne $$assigned_transcript{'hmmhit'}) {
+			return 0;
+		}
+		# the alignment coords do not overlap
+		if ($$candidate{'ali_end'} <= $$assigned_transcript{'ali_start'} or $$candidate{'ali_start'} >= $$assigned_transcript{'ali_end'}) {
+			print_no_overlap($candidate, $assigned_transcript, 'transcript')
+				if $verbose;
+		}
+		else {
+			print_overlap($candidate, $assigned_transcript, 'transcript')
+				if $verbose;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+sub print_overlap {
+	my $candidate = shift;
+	my $transcript = shift;
+	my $level      = shift;
+	printf $stdout "%s[%d:%d] (hmm %d-%d) and %s[%d:%d] (hmm %d-%d) overlap on %s level.\n", 
+		$$transcript{'header'},
+		$$transcript{'ali_start'},
+		$$transcript{'ali_end'},
+		$$transcript{'hmm_start'},
+		$$transcript{'hmm_end'},
+		$$candidate{'header'},
+		$$candidate{'ali_start'},
+		$$candidate{'ali_end'},
+		$$candidate{'hmm_start'},
+		$$candidate{'hmm_end'},
+		$level
+	;
+}
+
+sub print_no_overlap {
+	my $candidate = shift;
+	my $transcript = shift;
+	my $level      = shift;
+	printf $stdout "%s[%d:%d] (hmm %d-%d) and %s[%d:%d] (hmm %d-%d) do not overlap on %s level.\n", 
+		$$transcript{'header'},
+		$$transcript{'ali_start'},
+		$$transcript{'ali_end'},
+		$$transcript{'hmm_start'},
+		$$transcript{'hmm_end'},
+		$$candidate{'header'},
+		$$candidate{'ali_start'},
+		$$candidate{'ali_end'},
+		$$candidate{'hmm_start'},
+		$$candidate{'hmm_end'},
+		$level
+	;
+}
+
+sub transcripts_overlap {
+	my $already_matched = shift;
+	my $candidate = shift;
+	my $overlap = 0;
+	foreach my $assigned_transcript (@$already_matched) {
+		# the candidate is either before or after the already assigned transcript
+		# this is ok
+		if ($$candidate{'ali_end'} <= $$assigned_transcript{'ali_start'} or $$candidate{'ali_start'} >= $$assigned_transcript{'ali_end'}) {
+			printf $stdout "%s[%d:%d] (hmm %d-%d) and %s[%d:%d] (hmm %d-%d) do not overlap.\n", 
+				$$already_matched{'header'},
+				$$already_matched{'ali_start'},
+				$$already_matched{'ali_end'},
+				$$already_matched{'hmm_start'},
+				$$already_matched{'hmm_end'},
+				$$candidate{'header'},
+				$$candidate{'ali_start'},
+				$$candidate{'ali_end'},
+				$$candidate{'hmm_start'},
+				$$candidate{'hmm_end'}
+					if $verbose;
+			# this is ok, best case
+		}
+		else {
+			
+		}
+	}
+}
+
+
+# Finds the ORF for two sequences by aligning them using Exonerate. The program
+# clips sequences if it detects frameshift errors and stuff like that.
+
+sub get_orf {
+	my $proteome_sequence = shift;
+	my $est_sequence      = shift;
+	unless ($proteome_sequence and $est_sequence) { return undef }
+	my $alignment = Wrapper::Exonerate->new($proteome_sequence, $est_sequence);
+	$alignment->search();
+	unless ($alignment->cdna_sequence()) { return undef }
+	return (
+		$alignment->translated_cdna(),
+		$alignment->cdna_sequence(),
+		$alignment->cdna_start(),
+		$alignment->cdna_end(),
+		$alignment->aa_start(),
+		$alignment->aa_end(),
+	);
+}
+
+# determines whether the ORF overlaps with the HMM alignment by a
+# certain percentage. 
+sub extended_orf_overlaps_hmm {
+	my $cand = shift;
+	my $orf_overlap = 0;
+	my $ali_length = abs( $cand->{'ali_end'} - $cand->{'ali_start'} );
+	my $overlap_length = get_overlap_length($cand);
+	return $overlap_length / $ali_length;
+}
+
+# determines whether enough of the extended ORF is inside the
+# orthologous region
+sub overlap_by_orf {
+	my $cand = shift;
+	my $orf_overlap = 0;
+	my $orf_length = abs( $cand->{'extended_orf_aa_end'} - $cand->{'extended_orf_aa_start'} );
+	my $overlap_length = get_overlap_length($cand);
+	return $overlap_length / $orf_length;
+}
+
+sub get_overlap_length {
+	my $cand = shift;
+	# orf starts before alignment end, ends after alignment start -> overlaps alignment
+	if ( $cand->{'extended_orf_aa_start_on_transcript'} <= $cand->{'ali_end'} and $cand->{'extended_orf_aa_end_on_transcript'} >= $cand->{'ali_start'} ) {
+		# take the innermost start coordinate
+		my $overlap_start = $cand->{'extended_orf_aa_start_on_transcript'} > $cand->{'ali_start'} ? $cand->{'extended_orf_aa_start_on_transcript'} : $cand->{'ali_start'};
+		# take the innermost end coordinate
+		my $overlap_end = $cand->{'extended_orf_aa_end_on_transcript'} < $cand->{'ali_end'} ? $cand->{'extended_orf_aa_end_on_transcript'} : $cand->{'ali_end'};
+		my $overlap_length = $overlap_end - $overlap_start;
+		return $overlap_length;
+	}
+	else {
+		return 0;
+	}
+}
+
+sub calculate_orf_and_hmm_overlap {
+	my $cand        = shift;
+	my $orf_overlap = 0;
+	my $orf_length  = $cand->{'orf_aa_end'} - $cand->{'orf_aa_start'};
+	# if the orf is somewhere else, there is no overlap
+	if    ($cand->{'orf_aa_end'} < $cand->{'ali_start'})    { return 0 }
+	elsif ($cand->{'ali_end'}    < $cand->{'orf_aa_start'}) { return 0 }
+	# orf coords are identical to hmm coords (100% overlap)
+	elsif ($cand->{'orf_aa_start'} == $cand->{'ali_start'} and $cand->{'orf_aa_end'} == $cand->{'ali_end'}) { return 1 }
+
+	# calculate percentage overlap
+	# orf and hmm start are the same
+	if ($cand->{'orf_aa_start'} == $cand->{'ali_start'}) {
+		# orf ends after hmm, start is the same (orf is longer than hmm)
+		if ($cand->{'orf_aa_end'} > $cand->{'ali_end'}) { 
+			$orf_overlap = $cand->{'ali_end'} - $cand->{'orf_aa_start'};
+			return $orf_overlap / $orf_length;
+		}
+		# orf ends before hmm, start is the same (orf is shorter than hmm, fits completely)
+		else {
+			$orf_overlap = $cand->{'orf_aa_end'} - $cand->{'orf_aa_start'};
+			return 1;
+		}
+	}
+	# orf and hmm end are the same
+	if ($cand->{'orf_aa_end'} == $cand->{'ali_end'}) {
+		# orf starts after hmm, end is the same (orf is shorter than hmm, fits completely)
+		if ($cand->{'orf_aa_start'} > $cand->{'ali_start'}) {
+			return 1;
+		}
+		# orf starts before hmm, end is the same (orf is longer than hmm)
+		else {
+			$orf_overlap = $cand->{'orf_aa_end'} - $cand->{'ali_start'};
+			return $orf_overlap / $orf_length;
+		}
+	}
+	# orf starts before hmm, ends before hmm (partial overlap)
+	if ($cand->{'orf_aa_start'} < $cand->{'ali_start'} and $cand->{'orf_aa_end'} < $cand->{'ali_end'}) {
+			$orf_overlap = $cand->{'orf_aa_end'} - $cand->{'ali_start'};
+			return $orf_overlap / $orf_length;
+	}
+	# orf starts after hmm, ends after hmm (partial overlap)
+	if ($cand->{'orf_aa_start'} > $cand->{'ali_start'} and $cand->{'orf_aa_end'} > $cand->{'ali_end'}) {
+			$orf_overlap = $cand->{'ali_end'} - $cand->{'orf_aa_start'};
+			return $orf_overlap / $orf_length;
+	}
+	# orf starts before hmm, ends after hmm (orf is longer than hmm)
+	if ($cand->{'orf_aa_start'} < $cand->{'ali_start'} and $cand->{'orf_aa_end'} > $cand->{'ali_end'}) {
+			$orf_overlap = $cand->{'orf_aa_end'} - $cand->{'ali_start'};
+			return $orf_overlap / $orf_length;
+	}
+	# orf starts after hmm, ends before hmm (shorter than hmm, fits completely)
+	if ($cand->{'orf_aa_start'} > $cand->{'ali_start'} and $cand->{'orf_aa_end'} < $cand->{'ali_end'}) {
+			return 1;
+	}
+}
+
+sub orf_percentage {
+	my $h = shift;
+	return length( $h->{'orf_aa_sequence'} ) / ( abs( $h->{'ali_end'} - $h->{'ali_start'} ) + 1 );
+}
+
+sub overlaps_previous_hit {
+	my $other_hits = shift;
+	my $cand       = shift;
+	# test for original ORF coordinates
+	if ( coordinate_overlap($other_hits, $cand, 'orf_cdna_start_on_transcript', 'orf_cdna_end_on_transcript', 'orf_cdna_start_on_transcript', 'orf_cdna_end_on_transcript') ) {
+		printf $stdout "ORF (%d-%d nt) overlaps other ORF\n",
+			$cand->{'orf_cdna_start_on_transcript'}, 
+			$cand->{'orf_cdna_end_on_transcript'},
+		;
+		return 1;
+	}
+	# test whether the original orf overlaps with any extended ORFs
+	elsif ( coordinate_overlap($other_hits, $cand, 'orf_cdna_start_on_transcript', 'orf_cdna_end_on_transcript', 'extended_orf_cdna_start', 'extended_orf_cdna_end') ) {
+		printf $stdout "ORF (%d-%d nt) overlaps other extended ORF\n",
+			$cand->{'orf_cdna_start_on_transcript'}, 
+			$cand->{'orf_cdna_end_on_transcript'},
+		;
+		return 1;
+	}
+	# if the candidate has an extended ORF, test that too
+	if ($cand->{'extended_orf_cdna_start'}) {
+		# oops, got an overlap. remove the ORF extension and try again
+		if (coordinate_overlap($other_hits, $cand, 'extended_orf_cdna_start', 'extended_orf_cdna_end', 'extended_orf_cdna_start', 'extended_orf_cdna_end')) {
+			printf $stdout "Extended ORF (%d-%d nt) overlaps other extended ORF\n",
+				$cand->{'extended_orf_cdna_start'}, 
+				$cand->{'extended_orf_cdna_end'},
+			;
+			remove_extended_orf($cand);
+		}
+		# even the original ORF overlaps with the other extended ORF: not ok
+		if (coordinate_overlap($other_hits, $cand, 'extended_orf_cdna_start', 'extended_orf_cdna_end', 'orf_cdna_start_on_transcript', 'orf_cdna_end_on_transcript')) {
+			printf $stdout "Extended ORF (%d-%d nt) overlaps other non-extended ORF\n",
+				$cand->{'extended_orf_cdna_start'}, 
+				$cand->{'extended_orf_cdna_end'},
+			;
+			return 1;
+		}
+	}
+	
+	# otherwise, it's fine, no overlap
+	return 0;
+}
+
+sub region_mapped_before {
+	my $new_hit = shift;
+	my $previous_hits = shift;
+	my $old_hits_on_same_sequence = [ grep { $_->{'hmmhit'} eq $new_hit->{'hmmhit'} } @$previous_hits ];
+	if (coordinate_overlap($old_hits_on_same_sequence, $new_hit, 'ali_start', 'ali_end', 'ali_start', 'ali_end')) {
+		return 1;
+	}
+	return 0;
+}
+
+sub coordinate_overlap {
+	my $other_hits = shift;
+	my $cand = shift;
+	my $q_start_name = shift;
+	my $q_end_name = shift;
+	my $t_start_name = shift;
+	my $t_end_name = shift;
+	foreach my $hit ( grep { defined $_->{$q_start_name} } @$other_hits ) {
+		# skip this one unless the coordinates exist
+		unless (exists $hit->{$t_start_name}) { next }
+		# starts before other hit is over or ends after start of other hit
+		if ((
+				# starts before begin of another transcript, ends within or after the other transcript
+				$cand->{$q_start_name} < $hit->{$t_start_name}
+					and $cand->{$q_end_name} > $hit->{$t_start_name}
+				)
+				or (
+				# starts before end of another transcript, ends after the other transcript
+				$cand->{$q_start_name} < $hit->{$t_end_name}
+					and $cand->{$q_end_name} > $hit->{$t_end_name}
+				)
+				or (
+				# starts and ends within another transcript
+				$cand->{$q_start_name} > $hit->{$t_start_name}
+					and $cand->{$q_end_name} < $hit->{$t_end_name}
+				)
+			) {
+			if ($verbose) {
+				printf $stdout "Coordinates (%d-%d) overlap other coordinates (%d-%d)\n",
+					$cand->{$q_start_name},
+					$cand->{$q_end_name},
+					$hit->{$t_start_name},
+					$hit->{$t_end_name},
+				;
+			}
+			return 1;
+		}
+	}
+	return 0;
+}
+
+sub extended_orf_overlaps_previous_hit {
+	my $other_hits = shift;
+	my $cand       = shift;
+	foreach my $hit ( grep { defined $_->{'extended_orf_aa_sequence'} } @$other_hits ) {
+		# starts before other hit is over or ends after start of other hit
+		if ((
+				# starts before begin of another transcript, ends within or after the other transcript
+				$cand->{'extended_orf_cdna_start'} < $hit->{'extended_orf_cdna_start'}
+					and $cand->{'extended_orf_cdna_end'} > $hit->{'extended_orf_cdna_start'}
+				)
+				or (
+				# starts before end of another transcript, ends after the other transcript
+				$cand->{'extended_orf_cdna_start'} < $hit->{'extended_orf_cdna_end'}
+					and $cand->{'extended_orf_cdna_end'} > $hit->{'extended_orf_cdna_end'}
+				)
+				or (
+				# starts and ends within another transcript
+				$cand->{'extended_orf_cdna_start'} > $hit->{'extended_orf_cdna_start'}
+					and $cand->{'extended_orf_cdna_end'} < $hit->{'extended_orf_cdna_end'}
+				)
+			)
+		{
+			if ($verbose) {
+				printf $stdout "extended ORF (%d-%d nt) overlaps other extended ORF (%d-%d nt)\n",
+					$cand->{'extended_orf_cdna_start'}, 
+					$cand->{'extended_orf_cdna_end'},
+					$hit->{'extended_orf_cdna_start'},
+					$hit->{'extended_orf_cdna_end'}
+				;
+			}
+			return 1;
+		}
+	}
+	# otherwise, it's fine, no overlap
+	return 0;
+}
+
+sub remove_extended_orf {
+	my $hit = shift;
+	my @elems = qw( extended_orf_aa_sequence extended_orf_aa_start extended_orf_aa_end extended_orf_cdna_sequence extended_orf_cdna_start extended_orf_cdna_end );
+	foreach my $key (@elems) {
+		delete $hit->{$key};
+	}
+}
+
+sub concatenate_sequences {
+	my $hits = shift;
+	my $orthoid = shift;
+	my $prev_end;
+	my $seq = '';
+	my $cdnaseq = '';
+	my $hdr = '';
+	my $cdnahdr = '';
+	foreach my $hit (@$hits) {
+
+		# before concatenating, fill gaps with 'X' if desired
+		if ($fill_with_x) {
+			if (defined $prev_end) {
+				my $num_x = $hit->{'orf_aa_start'} - $prev_end - 1;
+				my $xes   = 'X' x $num_x;
+				# 'N' sequences to fill the cdna sequence are three times longer
+				my $ns    = 'N' x ($num_x * 3);
+				$seq     .=  $xes;
+				$cdnaseq .= $ns;
+				print $stdout "Added $num_x 'X' to sequence\n" if $debug;
+			}
+			$prev_end = $hit->{'orf_aa_end'};
+		}
+
+		# concatenate sequences
+		$seq     .= defined $hit->{'extended_orf_aa_sequence'}   ? $hit->{'extended_orf_aa_sequence'}   : $hit->{'orf_aa_sequence'};
+		$cdnaseq .= defined $hit->{'extended_orf_cdna_sequence'} ? $hit->{'extended_orf_cdna_sequence'} : $hit->{'orf_cdna_sequence'};
+		printf $stdout "Appended sequence (%d/%d sites) to existing sequence (%d/%d sites)\n",
+			length $seq,
+			length $cdnaseq,
+			length($seq) - length($hit->{'orf_aa_sequence'}),
+			length($cdnaseq) - length($hit->{'orf_cdna_sequence'})
+				if $debug;
+	}
+	# join headers
+	($hdr, $cdnahdr) = join_headers($hits, $orthoid);
+
+	return ($hdr, $seq, $cdnahdr, $cdnaseq);
+}
+
+sub join_headers {
+	my $hits = shift;
+	my $orthoid = shift;
+	my $hdr = '';
+	my $this_hdr = '';
+	my $cdnahdr = '';
+	my $rf;
+	# join aa headers
+
+	# format the header according to output format
+	$hdr = format_header(
+		$orthoid,
+		$hits->[0]->{'reftaxon'},
+		$species_name,
+		join_transcript_headers($hits, 'aa')
+	);
+
+	# join cdna headers
+
+	# format the header according to output format
+	$cdnahdr = format_header(
+		$orthoid,
+		$hits->[0]->{'reftaxon'},
+		$species_name,
+		join_transcript_headers($hits, 'nt')
+	);
+	return($hdr, $cdnahdr);
+}
+
+sub get_rf {
+	my $s = shift;
+	$s =~ s/\s*$//;
+	$s =~ s/( |_|:)?((\[revcomp]:)?(\[translate\(\d\)\]))$//;
+	return $s, $2;
+}
+
+sub get_ortholog_group {
+	my $setid = shift;
+	my $orthoid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_ortholog_group($setid, $orthoid);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_ortholog_group($setid, $orthoid);
+	}
+}
+
+sub get_ortholog_group_nucleotide {
+	my $specid = shift;
+	my $orthoid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_ortholog_group_nucleotide($set_id, $orthoid);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_ortholog_group_nucleotide($set_id, $orthoid);
+	}
+}
+
+sub get_taxid_for_species {
+	my $specid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_taxid_for_species($specid);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_taxid_for_species($specid);
+	}
+}
+
+sub get_real_table_names {
+	my $specid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_real_table_names($specid);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_real_table_names($specid);
+	}
+}
+
+sub get_set_id {
+	my $setn = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_set_id($setn);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_set_id($setn);
+	}
+}
+
+sub get_taxa_in_set {
+	my $setid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_taxa_in_set($setid);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_taxa_in_set($setid);
+	}
+}
+
+sub get_orthologs_for_set_hashref {
+	my $setid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_orthologs_for_set_hashref($setid);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_orthologs_for_set_hashref($setid);
+	}
+}
+
+sub create_log_evalues_view {
+	my $specid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::create_log_evalues_view($specid);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::create_log_evalues_view($specid);
+	}
+}
+
+sub get_logevalue_count {
+	my $specid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_logevalue_count($specid);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_logevalue_count($specid);
+	}
+}
+
+sub get_results_for_logevalue {
+	my $setid = shift;
+	my $specid = shift;
+	my $min = shift;
+	my $max = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_results_for_logevalue($setid, $specid, $min, $max);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_results_for_logevalue($setid, $specid, $min, $max);
+	}
+}
+
+sub get_reference_sequence {
+	my $hit = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_reference_sequence($hit);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_reference_sequence($hit);
+	}
+}
+
+sub get_nucleotide_transcript_for {
+	my $header = shift;
+	my $nt_seq = '';
+	# remove the revcomp/translate portion
+	(my $original_header = $header) =~ s/( |_|:)?(\[revcomp]:)?\[translate\(\d\)\]$//;
+	if ($debug) {
+		printf $stdout "translated header: <%s>\noriginal header: <%s>\n", $header, $original_header;
+	}
+	my $revcomp = $2;
+	if ($use_mysql) {
+		$nt_seq = Wrapper::Mysql::get_nucleotide_transcript_for($original_header);
+	}
+	elsif ($use_sqlite) {
+		$nt_seq = Wrapper::Sqlite::get_nucleotide_transcript_for($original_header);
+	}
+	if ($revcomp) { return($original_header, reverse_complement($nt_seq)) }
+	else { return($original_header, $nt_seq) }
+}
+
+sub get_transcript_for {
+	my $digest = shift;
+	my $sequence = '';
+	if ($use_mysql) {
+		$sequence = Wrapper::Mysql::get_transcript_for($digest);
+	}
+	elsif ($use_sqlite) {
+		$sequence = Wrapper::Sqlite::get_transcript_for($digest);
+	}
+	return $sequence;
+}
+
+sub reverse_complement {
+	my $seq = shift @_;
+	$seq =~ tr/AGCTYRKMWSagct/TCGARYMKWSTCGA/;
+	$seq = reverse $seq;
+	return $seq;
+}
+
+sub get_scores_list {
+	my $specid = shift;
+	my $setid = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_scores_list($specid, $setid, $hmmsearch_score_threshold);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_scores_list($specid, $setid, $hmmsearch_score_threshold);
+	}
+}
+
+sub get_hmmresults_for_single_score {
+	my $setid = shift;
+	my $score = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_hmmresults_for_single_score($setid, $score);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_hmmresults_for_single_score($setid, $score);
+	}
+}
+
+sub get_blastresults_for_hmmsearch_id {
+	my $setid = shift;
+	my $id = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_blastresults_for_hmmsearch_id($setid, $id);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_blastresults_for_hmmsearch_id($setid, $id);
+	}
+}
+
+sub get_results_for_single_score {
+	my $setid = shift;
+	my $score = shift;
+	if ($use_mysql) {
+		return Wrapper::Mysql::get_results_for_single_score($setid, $score);
+	}
+	elsif ($use_sqlite) {
+		return Wrapper::Sqlite::get_results_for_single_score($setid, $score);
+	}
+}
+
+sub get_reftaxon_name {
+	my $id = shift;
+	my $sh = undef;
+	if ($use_mysql) {
+		$sh = Wrapper::Mysql::get_reftaxon_name($id);
+		if ($sh) {
+			printf $stdout "got reftaxon %s for reciprocal hit %d\n", $sh, $id if $debug;
+			return $sh;
+		}
+		else {
+			print $stderr "Fatal: Could not get reference taxon name for $id\n";
+			exit(1);
+		}
+	}
+	elsif ($use_sqlite) {
+		$sh = Wrapper::Sqlite::get_reftaxon_name($id);
+		if ($sh) {
+			printf $stdout "got reftaxon %s for reciprocal hit %d\n", $sh, $id if $debug;
+			return $sh;
+		}
+		else {
+			print $stderr "Fatal: Could not get reference taxon name for $id\n";
+			exit(1);
+		}
+	}
+}
+
+sub crop_to_hmm_alignment {
+	my $seq = shift;
+	my $hdr = shift;
+	my $h = shift;
+	my $start = ( $h->{'ali_start'} - 1 ) * 3;
+	my $length = abs($h->{'ali_end'} - $h->{'ali_start'} + 1) * 3;
+	printf $stdout "Cropping sequence '%s' to HMM alignment region (%d-%d aa): %d-%d nt\n",
+		$hdr,
+		$h->{'ali_start'},
+		$h->{'ali_end'},
+		$start + 1,
+		$start + $length,
+			if $verbose;
+	return substr($seq, $start, $length);
+}
+
+sub hmm_to_orf {
+	# turn a hmm alignment region into an orf (at least as far as
+	# orthograph is concerned)
+	my $h = shift;
+	my $cdna_sequence = shift;
+	my $reference_sequence = shift;
+	my $ali_start_on_aa = $h->{'ali_start'};
+	my $aa_seq = get_transcript_for($h->{'hmmhit'});
+	my $cdna_length = abs($h->{'ali_end'} - $h->{'ali_start'} + 1) * 3;
+	my $cdna_start = ( $h->{'ali_start'} - 1 ) * 3;
+	my $cdna_end = $cdna_start + $cdna_length;
+	return (
+		# aa sequence -> return hmm region 
+		# cdna sequence -> calculate nt coordinates of HMM alignment region on transcript
+		# cdna start -> ali start
+		# cdna end -> ali end
+		# aa start -> AA start
+		# aa end -> AA end
+		substr($aa_seq, $h->{'ali_start'} - 1, $h->{'ali_end'} - $h->{'ali_start'} + 1),
+		$cdna_sequence,
+		$cdna_start,
+		$cdna_end,
+		$cdna_start,
+		$cdna_end,
+		$h->{'ali_start'},
+		$h->{'ali_end'},
+		$h->{'ali_start'},
+		$h->{'ali_end'},
+	);
+}
+
+sub try_to_extend_orf {
+	my $hit = shift;
+	my $prot_seq = shift;
+	my $est_seq = shift;
+	printf $stdout "Trying to extend ORF using complete transcript sequence (%d nt)\n", length($est_seq) if $verbose;
+	( $hit->{'extended_orf_aa_sequence'},
+		 $hit->{'extended_orf_cdna_sequence'},
+		 $hit->{'extended_orf_cdna_start'},
+		 $hit->{'extended_orf_cdna_end'},
+		 $hit->{'extended_orf_aa_start'},
+		 $hit->{'extended_orf_aa_end'} ) = get_orf($prot_seq, $est_seq);
+	# does the large orf cover all of the small orf?
+	if ($hit->{'extended_orf_cdna_start'} <= $hit->{'orf_cdna_start_on_transcript'}
+		and $hit->{'extended_orf_cdna_end'} >= $hit->{'orf_cdna_end_on_transcript'}) {
+		# this is ok!
+		if ($verbose) {
+			printf $stdout "Extended ORF (%d-%d) by %d nt to %d-%d\n", 
+				$hit->{'orf_cdna_start_on_transcript'},
+				$hit->{'orf_cdna_end_on_transcript'},
+				abs($hit->{'extended_orf_cdna_end'} - $hit->{'extended_orf_cdna_start'}) - abs($hit->{'orf_cdna_end_on_transcript'} - $hit->{'orf_cdna_start_on_transcript'}),
+				$hit->{'extended_orf_cdna_start'},
+				$hit->{'extended_orf_cdna_end'},
+			;
+		}
+	}
+	else {
+		if ($verbose) {
+			printf $stdout "Extended ORF (%d-%d) does not cover original ORF (%d-%d)\n",
+				$hit->{'extended_orf_cdna_start'},
+				$hit->{'extended_orf_cdna_end'},
+				$hit->{'orf_cdna_start_on_transcript'},
+				$hit->{'orf_cdna_end_on_transcript'},
+			;
+		}
+	}
+	# calculate orf aa coordinates on transcript, because
+	# extended_orf_aa coordinates are on the reference sequence!
+	# subtract 1 first because exonerate uses zero-based coordinates
+	$hit->{'extended_orf_aa_start_on_transcript'} = ( $hit->{'extended_orf_cdna_start'} - 1 ) / 3 + 1;
+	$hit->{'extended_orf_aa_end_on_transcript'}   = ( $hit->{'extended_orf_cdna_end'}   - 1 ) / 3 + 1;
+	return (
+	 $hit->{'extended_orf_aa_sequence'},
+	 $hit->{'extended_orf_cdna_sequence'},
+	 $hit->{'extended_orf_cdna_start'},
+	 $hit->{'extended_orf_cdna_end'},
+	 $hit->{'extended_orf_aa_start'},
+	 $hit->{'extended_orf_aa_end'},
+	 $hit->{'extended_orf_aa_start_on_transcript'},
+	 $hit->{'extended_orf_aa_end_on_transcript'}
+	);
+}
+
+sub transcript_not_long_enough {
+	my $result = shift;
+	my $length = calculate_length_of_ali($result);
+	if ($length < $minimum_transcript_length) { 
+		printf $stdout "Orthologous region under minimum transcript length (%d), only %d\n",
+			$minimum_transcript_length,
+			$length
+				unless $quiet;
+		return 1;
+	}
+	return 0;
+}
+
+sub calculate_length_of_ali {
+	my $result = shift;
+	return abs($result->{'ali_end'} - $result->{'ali_start'}) + 1;
+}

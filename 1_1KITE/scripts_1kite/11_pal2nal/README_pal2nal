@@ -1,0 +1,59 @@
+for i in *.linsi.aa.fas ; do a=`basename $i .linsi.aa.fas`; perl pal2nal.mod.pl $a.linsi.aa.fas $a.nt.fas -output fasta 1> $a.linsi.nt.fas 2> $a.error; done
+
+
+
+ hi,
+
+ also der codon hash von pal2nal gibt folgendes an:
+
+ "R" = "((CG.)|(AG(A|G|R)))"
+
+ dh es werden folgende 4 faelle nur akzeptiert:
+
+ CG*
+ AGA
+ AGG
+ AGR
+
+ die NCBI codon table gibt R als:
+
+ CGT
+ CGC
+ CGA
+ CGG
+ (= CG*)
+
+ AGA
+ AGG
+ (= AGR)
+
+ an.
+
+ M als ambiguity code ist A oder C.
+ also ist MGG = (A|C)GG
+
+
+ der fehler bei pal2nal kommt dann, wenn:
+
+ if ($tmpcodon !~ /$p2c{$tmpaa}/i) {
+  $message = "pepAlnPos $peppos: $tmpaa does not 
+correspond to $tmpcodon";
+  push(@{$retval{'message'}}, $message);
+ }
+
+
+ das MGG ist zwar R, findet sich aber so nicht im hash 
+wieder. und
+ pal2nal kann nicht automatisch A|C in M umwandeln. in 
+den pal2nal
+ codon-hashes werden nur Y und R als ambiguity codes 
+verstanden.
+
+ ein fix waere also nur moeglich, wenn man die hashes 
+entsprechend
+ erweitert. ich denke das sollte man entweder den 
+entwicklern schreiben
+ oder selbst loesen...
+
+ alex
+

@@ -1,0 +1,10 @@
+Usage: /tmp/keep-these-taxa.sh REFERENCE_TAXA_FILE OTHER_TAXA_FILE INPUT_DIR OUTPUT_DIR
+
+Filters input Fasta files with Hamstrad-formatted headers (single-line
+sequences!) in INPUT_DIR to contain only sequences from the reference
+taxa listed in REFERENCE_TAXA_FILE and the analyzed taxa from
+OTHER_TAXA_FILE. Places the result in OUTPUT_DIR.
+
+Note: this script is highly specific and is not suitable for anything
+else but the intended purpose.
+Note: uses a temporary file named /tmp/taxa-include.txt.

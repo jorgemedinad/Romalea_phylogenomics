@@ -1,0 +1,3 @@
+>EOG5B2RC0|Acromyrmex_echinatior|Aech_04240
+>EOG5B2RC0|Acyrthosiphon_pisum|ACYPI008063
+>EOG5B2RC0|Daphnia_pulex|hxAUG26us104g30t1

@@ -1,0 +1,28 @@
+Remove Core Taxa
+for aa files
+1) Create file with the core taxa you like to remove:
+	Open the script "RemoveCoreTaxa_DB.sh" and change the core taxa with the name you want to exclude
+	copy the script "RemoveCoreTaxa_DB.sh" in the directory where your fasta files are
+	run script: sh RemoveCoreTaxa_DB.sh
+	output: is a textfile "header2remove.txt", with all headers from the core taxa you assigned in the .sh script
+2) Remove all sequences you want to exclude with the script "multifastafilterNEW.pl"
+	run perl script: for file in EOG*.fas; do perl multifastafilterNEW.pl -v header2remove.txt $file; done >TraceFile_aa.log
+	output: fasta files, in which all core taxa are removed, which you assigned before (extension: .fas.filtered)
+			TraceFile.log (output what the script does during the run)
+3) Check if everything works well
+	run command: grep -c "seq #" TraceFile_aa.log						# count all taxa, which are removed
+				 grep ">" EOG*.linsi.aa.fas.filtered |wc -l			## count in filtered files all ">"
+				 grep ">" EOG*.linsi.aa.fas |wc -l					## count in original files all ">"
+				 
+for nt files
+1)	copy the text file "header2remove.txt" in the directory, where your nt files are
+2) Remove all sequences you want to exclude with the script "multifastafilterNEW.pl"
+	run perl script: for file in EOG*.fas; do perl multifastafilterNEW.pl -v header2remove.txt $file; done >TraceFile_nt.log
+	output: fasta files, in which all core taxa are removed, which you assigned before (extension: .fas.filtered)
+			TraceFile.log (output what the script does during the run)
+3) Check if everything works well
+	run command: grep -c "seq #" TraceFile_nt.log					# count all taxa, which are removed
+				 grep ">" EOG*.nt.fas.filtered |wc -l				## count in filtered files all ">"
+				 grep ">" EOG*.nt.fas |wc -l					## count in original files all ">"
+
+	

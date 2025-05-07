@@ -1,0 +1,3 @@
+>EOG502W7V|BMORI_2.0|Perissomma_mcalpinei_e3_r|C59947-128
+>EOG502W7V|MDEST_20120225|Inopus_rubriceps_e3_r|C49412-131
+>EOG502W7V|AGAMB_3.6|Australiphthiria_hilaris_e3_r|s3463_L_5073_0-51

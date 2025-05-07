@@ -1,0 +1,3 @@
+expand_outlier_file.pl  mafft_linsi_II.outlier.txt
+mkdir outlier-by-gene
+mv *.outlier outlier-by-gene

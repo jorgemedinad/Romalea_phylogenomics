@@ -1,0 +1,5 @@
+g++ -O4       combine-align.cpp                                               -o combine-align
+g++ -O4 -I .  seq-extractor.cpp seq-extractor-global-types-and-parameters.cpp -o seq-extractor-v0.4
+g++ -O4       remove_gap_only_positions.cpp                                   -o remove_gap_only_positions-v1.0
+g++ -O4       split-fasta-with-sequence-list.cpp                              -o split-fasta-with-sequence-list
+

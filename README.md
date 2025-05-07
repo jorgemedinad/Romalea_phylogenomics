@@ -31,8 +31,8 @@ Each subfolder contains its own `README.md` with step-specific instructions.
 
 ## Software Requirements
 
-- **Trimmomatic** (read trimming)
-- **SOAPdenovo2** (de novo assembly)
+- **Trimmomatic** ([link](https://github.com/timflutre/trimmomatic)) (read trimming)
+- **SOAPdenovo2** ([link](https://github.com/aquaskyline/SOAPdenovo2)) (de novo assembly)
 - **Orthograph** ([link](https://github.com/mptrsen/Orthograph)) (orthology inference)
 - **AMAS** ([link](https://github.com/marekborowiec/AMAS)) (concatenation and partitioning)
 - **IQ-TREE v2** ([link](https://iqtree.github.io/)) (phylogenetic inference)

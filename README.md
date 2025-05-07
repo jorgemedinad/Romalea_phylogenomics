@@ -35,7 +35,7 @@ Each subfolder contains its own `README.md` with step-specific instructions.
 - **SOAPdenovo2** (de novo assembly)
 - **Orthograph** ([link](https://github.com/mptrsen/Orthograph)) (orthology inference)
 - **AMAS** ([link](https://github.com/marekborowiec/AMAS)) (concatenation and partitioning)
-- **IQ-TREE v2** (phylogenetic inference)
+- **IQ-TREE v2** ([link](https://iqtree.github.io/)) (phylogenetic inference)
 - **Python 3 + Biopython** (for filtering scripts)
 - **Conda** (recommended for environment management)
 

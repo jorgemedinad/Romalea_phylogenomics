@@ -75,4 +75,4 @@ A future goal is to wrap this pipeline in a automatized workflow to improve repr
 
 ## Contact
 
-For questions or collaboration, please contact hsong@tamu.edu, jorgemedinad@tamu.edu or jackson.linde@tamu.edu
+For questions or collaboration regarding the workflow, please contact jackson.linde@tamu.edu, hsong@tamu.edu, or jorgemedinad@tamu.edu 
